@@ -17,6 +17,7 @@
 
   <PropertyGroup>
     <NoWarn>$(NoWarn);NU1605;CS1591</NoWarn>
+    <Version>0.104.2</Version>
   </PropertyGroup>
 
   <ItemGroup>
