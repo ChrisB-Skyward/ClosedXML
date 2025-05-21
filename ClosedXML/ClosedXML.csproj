@@ -18,6 +18,7 @@
   <PropertyGroup>
     <NoWarn>$(NoWarn);NU1605;CS1591</NoWarn>
     <Version>0.104.2-fork.1</Version>
+    <AssemblyName>$(MSBuildProjectName)-Skyward</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>
