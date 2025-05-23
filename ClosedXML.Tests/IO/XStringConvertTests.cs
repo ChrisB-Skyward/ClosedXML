@@ -1,4 +1,4 @@
-﻿using NUnit.Framework;
+using NUnit.Framework;
 using ClosedXML.IO;
 
 namespace ClosedXML.Tests.IO;
@@ -21,6 +21,7 @@ internal class XStringConvertTests
     [TestCase("_xaaBB_ _xAAbb_", "\uAABB \uAABB")]
     [TestCase(@"_Xceed_Something", @"_Xceed_Something")] // https://github.com/ClosedXML/ClosedXML/issues/1154
     [TestCase("_xD83DDE43_", "_xD83DDE43_")] // 8 hex digit name, decoded by XmlConvert.DecodeName, but not by XString
+    [TestCase("DE_XAB500161_seo_title", "DE_XAB500161_seo_title")] // https://github.com/ClosedXML/ClosedXML/issues/2610
     public void Decodes_encoded_unicode_characters(string sourceText, string expectedText)
     {
         var decodedText = XStringConvert.Decode(sourceText);
