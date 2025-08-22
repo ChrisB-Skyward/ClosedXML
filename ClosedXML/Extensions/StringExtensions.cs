@@ -34,13 +34,14 @@ namespace ClosedXML.Excel
         {
             if (String.IsNullOrEmpty(sheetName)) return sheetName;
 
-            var needEscape = (!Char.IsLetter(sheetName[0]) && sheetName[0] != '_') ||
+            bool needEscape = (!Char.IsLetter(sheetName[0]) && sheetName[0] != '_') ||
                              XLHelper.IsValidA1Address(sheetName) ||
                              XLHelper.IsValidRCAddress(sheetName) ||
                              sheetName.Any(c => (Char.IsPunctuation(c) && c != '.' && c != '_') ||
                                                 Char.IsSeparator(c) ||
                                                 Char.IsControl(c) ||
-                                                Char.IsSymbol(c));
+                                                Char.IsSymbol(c) ||
+                                                Char.IsNumber(c));
             if (needEscape)
                 return String.Concat('\'', sheetName.Replace("'", "''"), '\'');
             else
