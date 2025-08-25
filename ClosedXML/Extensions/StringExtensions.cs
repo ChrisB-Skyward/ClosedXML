@@ -40,8 +40,7 @@ namespace ClosedXML.Excel
                              sheetName.Any(c => (Char.IsPunctuation(c) && c != '.' && c != '_') ||
                                                 Char.IsSeparator(c) ||
                                                 Char.IsControl(c) ||
-                                                Char.IsSymbol(c) ||
-                                                Char.IsNumber(c));
+                                                Char.IsSymbol(c));
             if (needEscape)
                 return String.Concat('\'', sheetName.Replace("'", "''"), '\'');
             else
