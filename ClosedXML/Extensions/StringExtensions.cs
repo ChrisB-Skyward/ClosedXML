@@ -34,7 +34,7 @@ namespace ClosedXML.Excel
         {
             if (String.IsNullOrEmpty(sheetName)) return sheetName;
 
-            bool needEscape = (!Char.IsLetter(sheetName[0]) && sheetName[0] != '_') ||
+            var needEscape = (!Char.IsLetter(sheetName[0]) && sheetName[0] != '_') ||
                              XLHelper.IsValidA1Address(sheetName) ||
                              XLHelper.IsValidRCAddress(sheetName) ||
                              sheetName.Any(c => (Char.IsPunctuation(c) && c != '.' && c != '_') ||
