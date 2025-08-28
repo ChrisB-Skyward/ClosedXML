@@ -1,4 +1,6 @@
-using System;
+﻿using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.Diagnostics;
 
 namespace ClosedXML.Excel
@@ -6,7 +8,7 @@ namespace ClosedXML.Excel
     /// <summary>
     /// A representation of a <c>ST_Ref</c>, i.e. an area in a sheet (no reference to the sheet).
     /// </summary>
-    internal readonly struct XLSheetRange : IEquatable<XLSheetRange>
+    internal readonly struct XLSheetRange : IEquatable<XLSheetRange>, IEnumerable<XLSheetPoint>
     {
         internal XLSheetRange(XLSheetPoint point)
             : this(point, point)
@@ -67,7 +69,7 @@ namespace ClosedXML.Excel
         /// </summary>
         public int BottomRow => LastPoint.Row;
 
-        public override bool Equals(object obj)
+        public override bool Equals(object? obj)
         {
             return obj is XLSheetRange range && Equals(range);
         }
@@ -99,19 +101,41 @@ namespace ClosedXML.Excel
         /// <exception cref="FormatException">If the input doesn't match expected grammar.</exception>
         public static XLSheetRange Parse(ReadOnlySpan<char> input)
         {
+            if (!TryParse(input, out var area))
+                throw new FormatException($"Area reference doesn't have correct format: '{input.ToString()}'.");
+
+            return area;
+        }
+
+        /// <summary>
+        /// Try to parse area. Doesn't accept any extra whitespace anywhere in the input. Letters
+        /// must be upper case. Area can specify one corner (<c>A1</c>) or both corners (<c>A1:B3</c>).
+        /// </summary>
+        public static bool TryParse(ReadOnlySpan<char> input, out XLSheetRange area)
+        {
             var separatorIndex = input.IndexOf(':');
             if (separatorIndex == -1)
             {
-                var sheetPoint = XLSheetPoint.Parse(input);
-                return new XLSheetRange(sheetPoint, sheetPoint);
+                if (!XLSheetPoint.TryParse(input, out var sheetPoint))
+                {
+                    area = default;
+                    return false;
+                }
+
+                area = new XLSheetRange(sheetPoint, sheetPoint);
+                return true;
             }
 
-            var first = XLSheetPoint.Parse(input.Slice(0, separatorIndex));
-            var second = XLSheetPoint.Parse(input.Slice(separatorIndex + 1, input.Length - separatorIndex - 1));
-            if (first.Column > second.Column || first.Row > second.Row)
-                throw new FormatException($"First reference must have smaller column and row ('{input.ToString()}')");
+            if (!XLSheetPoint.TryParse(input[..separatorIndex], out var first) ||
+                !XLSheetPoint.TryParse(input[(separatorIndex + 1)..], out var second) ||
+                first.Column > second.Column || first.Row > second.Row)
+            {
+                area = default;
+                return false;
+            }
 
-            return new XLSheetRange(first, second);
+            area = new XLSheetRange(first, second);
+            return true;
         }
 
         /// <summary>
@@ -239,6 +263,18 @@ namespace ClosedXML.Excel
         }
 
         /// <summary>
+        /// Create a new range from this one by taking a number of rows from the left column to the right.
+        /// </summary>
+        /// <param name="columns">How many columns to take, must be at least one.</param>
+        public XLSheetRange SliceFromLeft(int columns)
+        {
+            if (columns < 1)
+                throw new ArgumentOutOfRangeException();
+
+            return new XLSheetRange(FirstPoint, new XLSheetPoint(FirstPoint.Row, LeftColumn + columns - 1));
+        }
+
+        /// <summary>
         /// Create a new range from this one by taking a number of rows from the bottom row up.
         /// </summary>
         /// <param name="columns">How many columns to take, must be at least one.</param>
@@ -266,11 +302,20 @@ namespace ClosedXML.Excel
         }
 
         /// <summary>
+        /// Does this range intersects with <paramref name="other"/>.
+        /// </summary>
+        /// <returns><c>true</c> if intersects, <c>false</c> otherwise.</returns>
+        internal bool Intersects(XLSheetRange other)
+        {
+            return Intersect(other) is not null;
+        }
+
+        /// <summary>
         /// Do an intersection between this range and other range.
         /// </summary>
         /// <param name="other">Other range.</param>
         /// <returns>The intersection range if it exists and is non-empty or null, if intersection doesn't exist.</returns>
-        public XLSheetRange? Intersect(XLSheetRange other)
+        internal XLSheetRange? Intersect(XLSheetRange other)
         {
             var leftColumn = Math.Max(LeftColumn, other.LeftColumn);
             var rightColumn = Math.Min(RightColumn, other.RightColumn);
@@ -281,6 +326,17 @@ namespace ClosedXML.Excel
                 return null;
 
             return new XLSheetRange(topRow, leftColumn, bottomRow, rightColumn);
+        }
+
+        /// <summary>
+        /// Does this range overlaps the <paramref name="otherRange"/>?
+        /// </summary>
+        internal bool Overlaps(XLSheetRange otherRange)
+        {
+            return TopRow <= otherRange.TopRow &&
+                RightColumn >= otherRange.RightColumn &&
+                BottomRow >= otherRange.BottomRow &&
+                LeftColumn <= otherRange.LeftColumn;
         }
 
         /// <summary>
@@ -320,6 +376,274 @@ namespace ClosedXML.Excel
             var topLeftCorner = FirstPoint.ShiftRow(rowShift);
             var bottomRightCorner = LastPoint.ShiftRow(rowShift);
             return new XLSheetRange(topLeftCorner, bottomRightCorner);
+        }
+
+        /// <summary>
+        /// Return a new range that has been shifted in horizontal direction by <paramref name="columnShift"/>.
+        /// </summary>
+        /// <param name="columnShift">By how much to shift the range, positive - rightward, negative - leftward.</param>
+        /// <returns>Newly created area.</returns>
+        internal XLSheetRange ShiftColumns(int columnShift)
+        {
+            var topLeftCorner = FirstPoint.ShiftColumn(columnShift);
+            var bottomRightCorner = LastPoint.ShiftColumn(columnShift);
+            return new XLSheetRange(topLeftCorner, bottomRightCorner);
+        }
+
+        public IEnumerator<XLSheetPoint> GetEnumerator()
+        {
+            for (var row = TopRow; row <= BottomRow; ++row)
+            {
+                for (var col = LeftColumn; col <= RightColumn; ++col)
+                {
+                    yield return new XLSheetPoint(row, col);
+                }
+            }
+        }
+
+        IEnumerator IEnumerable.GetEnumerator()
+        {
+            return GetEnumerator();
+        }
+
+        /// <summary>
+        /// Calculate size and position of the area when another area is inserted into a sheet.
+        /// </summary>
+        /// <param name="insertedArea">Inserted area.</param>
+        /// <param name="result">The result, might be <c>null</c> as a valid result if area is pushed out.</param>
+        /// <returns><c>true</c> if results wasn't partially shifted.</returns>
+        internal bool TryInsertAreaAndShiftRight(XLSheetRange insertedArea, out XLSheetRange? result)
+        {
+            // Inserted fully upward, downward or to the right
+            if (insertedArea.BottomRow < TopRow ||
+                insertedArea.TopRow > BottomRow ||
+                insertedArea.LeftColumn > RightColumn)
+            {
+                result = this;
+                return true;
+            }
+
+            var fullyOverlaps = insertedArea.TopRow <= TopRow &&
+                                insertedArea.BottomRow >= BottomRow;
+            if (!fullyOverlaps)
+            {
+                result = null;
+                return false;
+            }
+
+            // Are is effectively inserted into a seam at the left column of the insertedArea
+            if (insertedArea.LeftColumn <= LeftColumn)
+            {
+                // Area is completely pushed out
+                if (LeftColumn + insertedArea.Width > XLHelper.MaxColumnNumber)
+                {
+                    result = null;
+                    return true;
+                }
+
+                // Area is partially pushed out
+                if (RightColumn + insertedArea.Width > XLHelper.MaxColumnNumber)
+                {
+                    var pushedOutColsCount = RightColumn + insertedArea.Width - XLHelper.MaxColumnNumber;
+                    var keepCols = Width - pushedOutColsCount;
+                    var resized = SliceFromLeft(keepCols);
+                    result = resized.ShiftColumns(insertedArea.Width);
+                    return true;
+                }
+
+                // Not pushed out = only shift
+                result = ShiftColumns(insertedArea.Width);
+                return true;
+            }
+
+            result = ExtendRight(insertedArea.Width);
+            return true;
+        }
+
+        /// <summary>
+        /// Calculate size and position of the area when another area is inserted into a sheet.
+        /// </summary>
+        /// <param name="insertedArea">Inserted area.</param>
+        /// <param name="result">The result, might be <c>null</c> as a valid result if area is pushed out.</param>
+        /// <returns><c>true</c> if results wasn't partially shifted.</returns>
+        internal bool TryInsertAreaAndShiftDown(XLSheetRange insertedArea, out XLSheetRange? result)
+        {
+            // Inserted fully to the left, to the right or below
+            if (insertedArea.RightColumn < LeftColumn ||
+                insertedArea.LeftColumn > RightColumn ||
+                insertedArea.TopRow > BottomRow)
+            {
+                result = this;
+                return true;
+            }
+
+            var fullyOverlaps = insertedArea.LeftColumn <= LeftColumn &&
+                                insertedArea.RightColumn >= RightColumn;
+            if (!fullyOverlaps)
+            {
+                result = null;
+                return false;
+            }
+
+            // Are is effectively inserted into a seam at the top row of the insertedArea
+            if (insertedArea.TopRow <= TopRow)
+            {
+                // Area is completely pushed out
+                if (TopRow + insertedArea.Height > XLHelper.MaxRowNumber)
+                {
+                    result = null;
+                    return true;
+                }
+
+                // Area is partially pushed out
+                if (BottomRow + insertedArea.Height > XLHelper.MaxRowNumber)
+                {
+                    var pushedOutRowsCount = BottomRow + insertedArea.Height - XLHelper.MaxRowNumber;
+                    var keepRows = Height - pushedOutRowsCount;
+                    var resized = SliceFromTop(keepRows);
+                    result = resized.ShiftRows(insertedArea.Height);
+                    return true;
+                }
+
+                // Not pushed out = only shift
+                result = ShiftRows(insertedArea.Height);
+                return true;
+            }
+
+            result = ExtendBelow(insertedArea.Height);
+            return true;
+        }
+
+        /// <summary>
+        /// Take the area and reposition it as if the <paramref name="deletedArea"/> was removed
+        /// from sheet. If cells the left of the area are deleted, the area shifts to the left.
+        /// If <paramref name="deletedArea"/> is within the area, the width of the area decreases.
+        /// </summary>
+        /// <remarks>
+        /// If the method returns <c>false</c>, there is a partial cover and it's up to you to
+        /// decide what to do.
+        /// </remarks>
+        /// <returns>
+        /// The <paramref name="result"/> has a value <c>null</c> if the range was completely
+        /// removed by <paramref name="deletedArea"/>.
+        /// </returns>
+        internal bool TryDeleteAreaAndShiftLeft(XLSheetRange deletedArea, out XLSheetRange? result)
+        {
+            // Deleted area is fully upwards, downwards or to the right of this area.
+            if (deletedArea.BottomRow < TopRow ||
+                deletedArea.TopRow > BottomRow ||
+                deletedArea.LeftColumn > RightColumn)
+            {
+                result = this;
+                return true;
+            }
+
+            var doesntOverlapHeight = deletedArea.TopRow > TopRow ||
+                                      deletedArea.BottomRow < BottomRow;
+            var deletesColumnsToLeft = deletedArea.LeftColumn < LeftColumn;
+            var deletesColumnsOfArea = deletedArea.LeftColumn <= RightColumn &&
+                                       deletedArea.RightColumn >= LeftColumn;
+            if (doesntOverlapHeight && (deletesColumnsToLeft || deletesColumnsOfArea))
+            {
+                result = null;
+                return false;
+            }
+
+            var repositioned = this;
+            if (deletesColumnsOfArea)
+            {
+                // Decrease width of repositioned area
+                var left = Math.Max(deletedArea.LeftColumn, repositioned.LeftColumn);
+                var right = Math.Min(deletedArea.RightColumn, repositioned.RightColumn);
+
+                var columnsToDelete = right - left + 1;
+                var newWidth = repositioned.Width - columnsToDelete;
+                if (newWidth == 0)
+                {
+                    result = null;
+                    return true;
+                }
+
+                repositioned = repositioned.SliceFromLeft(newWidth);
+            }
+
+            if (deletesColumnsToLeft)
+            {
+                // There are some deleted columns to the left of the area -> shift left
+                var deletedLastColumnsOutwards = Math.Min(repositioned.LeftColumn - 1, deletedArea.RightColumn);
+
+                var shiftLeft = deletedLastColumnsOutwards - deletedArea.LeftColumn + 1;
+                repositioned = repositioned.ShiftColumns(-shiftLeft);
+            }
+
+            result = repositioned;
+            return true;
+        }
+
+        /// <summary>
+        /// Take the area and reposition it as if the <paramref name="deletedArea"/> was removed
+        /// from sheet. If cells upward of the area are deleted, the area shifts to the upward.
+        /// If <paramref name="deletedArea"/> is within the area, the height of the area decreases.
+        /// </summary>
+        /// <remarks>
+        /// If the method returns <c>false</c>, there is a partial cover and it's up to you to
+        /// decide what to do.
+        /// </remarks>
+        /// <returns>
+        /// The <paramref name="result"/> has a value <c>null</c> if the range was completely
+        /// removed by <paramref name="deletedArea"/>.
+        /// </returns>
+        internal bool TryDeleteAreaAndShiftUp(XLSheetRange deletedArea, out XLSheetRange? result)
+        {
+            // Deleted area is fully on left, right or bottom side of this area.
+            if (deletedArea.RightColumn < LeftColumn ||
+                deletedArea.LeftColumn > RightColumn ||
+                deletedArea.TopRow > BottomRow)
+            {
+                result = this;
+                return true;
+            }
+
+            var doesntOverlapWidth = deletedArea.LeftColumn > LeftColumn ||
+                                     deletedArea.RightColumn < RightColumn;
+            var deletesRowsAboveArea = deletedArea.TopRow < TopRow;
+            var deletesRowsOfArea = deletedArea.TopRow <= BottomRow &&
+                                    deletedArea.BottomRow >= TopRow;
+            if (doesntOverlapWidth && (deletesRowsAboveArea || deletesRowsOfArea))
+            {
+                result = null;
+                return false;
+            }
+
+            var repositioned = this;
+            if (deletesRowsOfArea)
+            {
+                // Decrease height of repositioned area
+                var top = Math.Max(deletedArea.TopRow, repositioned.TopRow);
+                var bottom = Math.Min(deletedArea.BottomRow, repositioned.BottomRow);
+
+                var rowsToDelete = bottom - top + 1;
+                var newHeight = repositioned.Height - rowsToDelete;
+                if (newHeight == 0)
+                {
+                    result = null;
+                    return true;
+                }
+
+                repositioned = repositioned.SliceFromTop(newHeight);
+            }
+
+            if (deletesRowsAboveArea)
+            {
+                // There are some deleted rows above the area -> shift up
+                var deletedLastRowAboveArea = Math.Min(repositioned.TopRow - 1, deletedArea.BottomRow);
+
+                var shiftUp = deletedLastRowAboveArea - deletedArea.TopRow + 1;
+                repositioned = repositioned.ShiftRows(-shiftUp);
+            }
+
+            result = repositioned;
+            return true;
         }
     }
 }

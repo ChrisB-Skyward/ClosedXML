@@ -15,6 +15,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using ClosedXML.Excel.IO;
+using ClosedXML.Parser;
 using Ap = DocumentFormat.OpenXml.ExtendedProperties;
 using Formula = DocumentFormat.OpenXml.Spreadsheet.Formula;
 using Op = DocumentFormat.OpenXml.CustomProperties;
@@ -805,28 +806,61 @@ namespace ClosedXML.Excel
         private void LoadTextBox<T>(IXLDrawing<T> xlDrawing, XElement textBox)
         {
             var attStyle = textBox.Attribute("style");
-            if (attStyle != null) LoadTextBoxStyle<T>(xlDrawing, attStyle);
+            if (attStyle != null) LoadTextBoxStyle(xlDrawing, attStyle);
 
             var attInset = textBox.Attribute("inset");
-            if (attInset != null) LoadTextBoxInset<T>(xlDrawing, attInset);
+            if (attInset != null) LoadTextBoxInset(xlDrawing, attInset);
         }
 
         private void LoadTextBoxInset<T>(IXLDrawing<T> xlDrawing, XAttribute attInset)
         {
             var split = attInset.Value.Split(',');
-            xlDrawing.Style.Margins.Left = GetInsetValue(split[0]);
-            xlDrawing.Style.Margins.Top = GetInsetValue(split[1]);
-            xlDrawing.Style.Margins.Right = GetInsetValue(split[2]);
-            xlDrawing.Style.Margins.Bottom = GetInsetValue(split[3]);
+            xlDrawing.Style.Margins.Left = GetInsetInInches(split[0], DpiX);
+            xlDrawing.Style.Margins.Top = GetInsetInInches(split[1], DpiY);
+            xlDrawing.Style.Margins.Right = GetInsetInInches(split[2], DpiX);
+            xlDrawing.Style.Margins.Bottom = GetInsetInInches(split[3], DpiY);
         }
 
-        private double GetInsetValue(string value)
+        /// <summary>
+        /// List of all VML length units and their conversion. Key is a name, value is a conversion
+        /// function to EMU. See <a href="https://learn.microsoft.com/en-us/windows/win32/vml/msdn-online-vml-units">documentation</a>.
+        /// </summary>
+        /// <remarks>
+        /// OI-29500 says <em>Office also uses EMUs throughout VML as a valid unit system</em>.
+        /// Relative units conversions are guesstimated by how Excel 2022 behaves for inset
+        /// attribute of <c>TextBox</c> element of a note/comment. Generally speaking, Excel
+        /// converts relative values to physical length (e.g. <c>px</c> to <c>pt</c>) and saves
+        /// them as such. The <c>ex</c>/<c>em</c> units are not interpreted as described in the
+        /// doc, but as 1/90th or an inch. The <c>%</c> seems to be always 0.
+        /// </remarks>
+        private static readonly Dictionary<string, Func<double, double, Emu?>> VmlLengthUnits = new()
         {
-            String v = value.Trim();
-            if (v.EndsWith("pt"))
-                return Double.Parse(v.Substring(0, v.Length - 2), CultureInfo.InvariantCulture) / 72.0;
-            else
-                return Double.Parse(v.Substring(0, v.Length - 2), CultureInfo.InvariantCulture);
+            {"in", (value, _) => Emu.From(value, AbsLengthUnit.Inch) },
+            {"cm", (value, _) => Emu.From(value, AbsLengthUnit.Centimeter) },
+            {"mm", (value, _) => Emu.From(value, AbsLengthUnit.Millimeter) },
+            {"pt", (value, _) => Emu.From(value, AbsLengthUnit.Point) },
+            {"pc", (value, _) => Emu.From(value, AbsLengthUnit.Pica) },
+            {"emu", (value, _) => Emu.From(value , AbsLengthUnit.Emu) },
+            {"px", (value, dpi) => Emu.From(value / dpi, AbsLengthUnit.Inch) },
+            {"em", (value, _) => Emu.From(value * 72.0 / 90.0, AbsLengthUnit.Point) },
+            {"ex", (value, _) => Emu.From(value * 72.0 / 90.0, AbsLengthUnit.Point) },
+            {"%", (_, _) => Emu.ZeroPt },
+        };
+
+        private static double GetInsetInInches(string value, double dpi)
+        {
+            var unit = value.Trim();
+            foreach (var (unitName, conversion) in VmlLengthUnits)
+            {
+                if (unit.EndsWith(unitName) && Double.TryParse(unit[..^unitName.Length], NumberStyles.Float, CultureInfo.InvariantCulture, out var unitValue))
+                {
+                    var insetEmu = conversion(unitValue, dpi) ?? Emu.ZeroPt;
+                    return insetEmu.To(AbsLengthUnit.Inch);
+                }
+            }
+
+            // Excel treats no/unexpected unit as 0
+            return 0;
         }
 
         private static void LoadTextBoxStyle<T>(IXLDrawing<T> xlDrawing, XAttribute attStyle)
@@ -1305,14 +1339,15 @@ namespace ClosedXML.Excel
                     formulaSlice.Set(cellAddress, formula);
 
                     // The key reason why Excel hates shared formulas is likely relative addressing and the messy situation it creates
-                    var formulaR1C1 = formula.GetFormulaR1C1(cellAddress);
+                    var formulaR1C1 = FormulaConverter.ToR1C1(formulaText, cellAddress.Row, cellAddress.Column);
                     sharedFormulasR1C1.Add(sharedIndex, formulaR1C1);
                 }
                 else
                 {
                     // Spec: The formula expression for a cell that is specified to be part of a shared formula
                     // (and is not the master) shall be ignored, and the master formula shall override.
-                    formula = XLCellFormula.NormalR1C1(sharedR1C1Formula);
+                    var sharedFormulaA1 = FormulaConverter.ToA1(sharedR1C1Formula, cellAddress.Row, cellAddress.Column);
+                    formula = XLCellFormula.NormalA1(sharedFormulaA1);
                     formulaSlice.Set(cellAddress, formula);
                 }
 
@@ -2294,16 +2329,12 @@ namespace ClosedXML.Excel
                 var xlRange = ws.Range(hl.Reference.Value);
                 foreach (XLCell xlCell in xlRange.Cells())
                 {
-                    xlCell.SettingHyperlink = true;
-
                     if (hl.Id != null)
-                        xlCell.SetHyperlink(new XLHyperlink(hyperlinkDictionary[hl.Id], tooltip));
+                        xlCell.SetCellHyperlink(new XLHyperlink(hyperlinkDictionary[hl.Id], tooltip));
                     else if (hl.Location != null)
-                        xlCell.SetHyperlink(new XLHyperlink(hl.Location.Value, tooltip));
+                        xlCell.SetCellHyperlink(new XLHyperlink(hl.Location.Value, tooltip));
                     else
-                        xlCell.SetHyperlink(new XLHyperlink(hl.Reference.Value, tooltip));
-
-                    xlCell.SettingHyperlink = false;
+                        xlCell.SetCellHyperlink(new XLHyperlink(hl.Reference.Value, tooltip));
                 }
             }
         }

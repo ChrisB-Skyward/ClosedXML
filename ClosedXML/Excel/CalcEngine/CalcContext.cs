@@ -2,6 +2,11 @@ using ClosedXML.Excel.CalcEngine.Exceptions;
 using System.Globalization;
 using System.Collections.Generic;
 using System.Linq;
+using ClosedXML.Excel.CalcEngine.Visitors;
+using ClosedXML.Parser;
+using System;
+using System.Threading;
+using ClosedXML.Excel.CalcEngine.Functions;
 
 namespace ClosedXML.Excel.CalcEngine
 {
@@ -70,6 +75,26 @@ namespace ClosedXML.Excel.CalcEngine
 
         internal XLSheetPoint FormulaSheetPoint => new(FormulaAddress.RowNumber, FormulaAddress.ColumnNumber);
 
+        /// <summary>
+        /// What date system should be used in calculation. Either 1900 or 1904.
+        /// </summary>
+        internal bool Use1904DateSystem { get; init; } = false;
+
+        /// <summary>
+        /// An upper limit (exclusive) of used calendar system.
+        /// </summary>
+        internal double DateSystemUpperLimit => Use1904DateSystem ? XLHelper.Calendar1904UpperLimit : XLHelper.Calendar1900UpperLimit;
+
+        internal CancellationToken CancellationToken { get; init; } = CancellationToken.None;
+
+        /// <summary>
+        /// A helper method to check is user cancelled the calculation in function loops.
+        /// </summary>
+        internal void ThrowIfCancelled()
+        {
+            CancellationToken.ThrowIfCancellationRequested();
+        }
+
         internal ScalarValue GetCellValue(XLWorksheet? sheet, int rowNumber, int columnNumber)
         {
             sheet ??= Worksheet;
@@ -92,7 +117,7 @@ namespace ClosedXML.Excel.CalcEngine
             // for them doesn't make sense.
             if (_recursive)
             {
-                var cell = sheet.GetCell(rowNumber, columnNumber);
+                var cell = sheet.GetCell(point);
                 return cell?.Value ?? Blank.Value;
             }
 
@@ -100,25 +125,186 @@ namespace ClosedXML.Excel.CalcEngine
         }
 
         /// <summary>
-        /// Get cells with a value for a reference.
+        /// This method goes over slices and returns a value for each non-blank cell. Because it is using
+        /// slice iterators, it scales with number of cells, not a size of area in reference (i.e. it works
+        /// fine even if reference is <c>A1:XFD1048576</c>). It also works for 3D references.  
         /// </summary>
-        /// <param name="reference">Reference for which to return cells.</param>
-        /// <returns>A lazy (non-materialized) enumerable of cells with a value for the reference.</returns>
-        internal IEnumerable<XLCell> GetNonBlankCells(Reference reference)
+        internal IEnumerable<ScalarValue> GetNonBlankValues(Reference reference)
         {
-            // XLCells is not suitable here, e.g. it doesn't count a cell twice if it is in multiple areas
-            var nonBlankCells = Enumerable.Empty<XLCell>();
             foreach (var area in reference.Areas)
             {
-                var areaCells = Worksheet.Internals.CellsCollection
-                    .GetCells(
-                        area.FirstAddress.RowNumber, area.FirstAddress.ColumnNumber,
-                        area.LastAddress.RowNumber, area.LastAddress.ColumnNumber,
-                        cell => !cell.IsEmpty());
-                nonBlankCells = nonBlankCells.Concat(areaCells);
+                var sheet = area.Worksheet ?? Worksheet;
+                var range = XLSheetRange.FromRangeAddress(area);
+
+                // A value can be either in a non-empty value slice or a empty cell with a formula.
+                var enumerator = sheet.Internals.CellsCollection.ForValuesAndFormulas(range);
+                while (enumerator.MoveNext())
+                {
+                    var point = enumerator.Current;
+                    var scalarValue = GetCellValue(sheet, point.Row, point.Column);
+                    if (!scalarValue.IsBlank)
+                        yield return scalarValue;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Return all points in the <paramref name="areaReference" /> that satisfy the <paramref name="criteria" />.
+        /// </summary>
+        internal IEnumerable<XLSheetPoint> GetCriteriaPoints(XLRangeAddress areaReference, Criteria criteria)
+        {
+            var sheet = areaReference.Worksheet ?? Worksheet;
+            var area = XLSheetRange.FromRangeAddress(areaReference);
+
+            // This is a performance optimization when user specifies a whole column
+            // in the tally function (e.g. SUMIF(A:B, "5", C:D)).
+            if (criteria.CanBlankValueMatch)
+            {
+                // Criteria can match blank cells, thus it's not possible to use optimized
+                // used enumerators and we have to check value of each cell.
+                foreach (var point in area)
+                {
+                    var scalarValue = GetCellValue(sheet, point.Row, point.Column);
+                    if (criteria.Match(scalarValue))
+                        yield return point;
+                }
+            }
+            else
+            {
+                // The criteria can never match blank cells. That means we can skip all blank
+                // cells entirely and use optimized used enumerators.
+                var enumerator = sheet.Internals.CellsCollection.ForValuesAndFormulas(area);
+                while (enumerator.MoveNext())
+                {
+                    var point = enumerator.Current;
+                    var scalarValue = GetCellValue(sheet, point.Row, point.Column);
+                    if (criteria.Match(scalarValue))
+                        yield return point;
+                }
+            }
+        }
+
+        internal IEnumerable<ScalarValue> GetFilteredNonBlankValues(Reference reference, string function, bool skipHiddenRows = false)
+        {
+            // Allocate one per call, because visitor holds info whether function was found in a formula.
+            var visitor = new FunctionVisitor(function);
+            foreach (var area in reference.Areas)
+            {
+                var sheet = area.Worksheet ?? Worksheet;
+                var range = XLSheetRange.FromRangeAddress(area);
+                var currentRow = 0;
+                var rowIsHidden = true;
+
+                // A value can be either in a non-empty value slice or a empty cell with a formula.
+                var enumerator = sheet.Internals.CellsCollection.ForValuesAndFormulas(range);
+                while (enumerator.MoveNext())
+                {
+                    var point = enumerator.Current;
+
+                    if (skipHiddenRows)
+                    {
+                        // If row changed, update hidden info about current row
+                        if (currentRow != point.Row)
+                        {
+                            currentRow = point.Row;
+                            rowIsHidden = sheet.Internals.RowsCollection.TryGetValue(currentRow, out var row) && row.IsHidden;
+                        }
+
+                        if (rowIsHidden)
+                            continue;
+                    }
+
+                    var formula = sheet.Internals.CellsCollection.FormulaSlice.Get(point);
+                    if (CallsFunction(formula, visitor))
+                        continue;
+
+                    var scalarValue = GetCellValue(sheet, point.Row, point.Column);
+                    if (!scalarValue.IsBlank)
+                        yield return scalarValue;
+                }
             }
 
-            return nonBlankCells;
+            yield break;
+
+            static bool CallsFunction(XLCellFormula? formula, FunctionVisitor visitor)
+            {
+                if (formula is null)
+                    return false;
+
+                if (!formula.A1.Contains(visitor.FunctionName, StringComparison.OrdinalIgnoreCase))
+                    return false;
+
+                FormulaParser<object?, object?, FunctionVisitor>.CellFormulaA1(formula.A1, visitor, visitor);
+                if (!visitor.Found)
+                    return false;
+
+                // In order to reuse same visitor without allocation, clear the found flag.
+                visitor.Clear();
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// This method should be used mostly for range arguments. If a value is scalar,
+        /// return a single value enumerable.
+        /// </summary>
+        internal IEnumerable<ScalarValue> GetNonBlankValues(AnyValue value)
+        {
+            if (value.TryPickScalar(out var scalar, out var collection))
+            {
+                if (scalar.IsBlank)
+                    return System.Array.Empty<ScalarValue>();
+
+                return new ScalarArray(scalar, 1, 1);
+            }
+
+            if (collection.TryPickT0(out var array, out var reference))
+                return array.Where(x => !x.IsBlank);
+
+            return GetNonBlankValues(reference);
+        }
+
+        internal IEnumerable<ScalarValue> GetAllValues(AnyValue value)
+        {
+            if (value.TryPickScalar(out var scalar, out var collection))
+                return new ScalarArray(scalar, 1, 1);
+
+            if (collection.TryPickT0(out var array, out var reference))
+                return array;
+
+            return GetAllCellValues(reference);
+        }
+
+        internal IEnumerable<ScalarValue> GetAllCellValues(Reference reference)
+        {
+            foreach (var area in reference.Areas)
+            {
+                var sheet = area.Worksheet;
+                foreach (var point in XLSheetRange.FromRangeAddress(area))
+                {
+                    yield return GetCellValue(sheet, point.Row, point.Column);
+                }
+            }
+        }
+
+        private class FunctionVisitor : CollectVisitor<FunctionVisitor>
+        {
+            public FunctionVisitor(string function)
+            {
+                FunctionName = function;
+            }
+
+            internal string FunctionName { get; }
+
+            public bool Found { get; private set; }
+
+            public void Clear() => Found = false;
+
+            public override object? Function(FunctionVisitor context, SymbolRange range, ReadOnlySpan<char> functionName, IReadOnlyList<object?> arguments)
+            {
+                Found = Found || functionName.Equals(FunctionName.AsSpan(), StringComparison.OrdinalIgnoreCase);
+                return default;
+            }
         }
     }
 }

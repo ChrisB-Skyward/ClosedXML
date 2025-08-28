@@ -54,7 +54,7 @@ namespace ClosedXML.Excel
 
         internal static Boolean PreserveSpaces(this String value)
         {
-            return value.StartsWith(" ") || value.EndsWith(" ") || value.Contains(Environment.NewLine);
+            return value.StartsWith(' ') || value.EndsWith(' ') || value.AsSpan().IndexOfAny('\n', '\r', '\t') >= 0;
         }
 
         internal static String ToCamel(this String value)
@@ -156,9 +156,9 @@ namespace ClosedXML.Excel
 
         internal static String TrimFormulaEqual(this String text)
         {
-            var trimmedStart = text.AsSpan().TrimStart();
-            if (trimmedStart.Length > 1 && trimmedStart[0] == '=')
-                return trimmedStart.Slice(1).ToString();
+            var trimmed = text.AsSpan().Trim();
+            if (trimmed.Length > 1 && trimmed[0] == '=')
+                return trimmed[1..].TrimStart().ToString();
 
             return text;
         }

@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
+using ClosedXML.Excel.CalcEngine.Visitors;
 
 namespace ClosedXML.Excel
 {
@@ -128,7 +129,9 @@ namespace ClosedXML.Excel
                 if (Cells(false).Any<XLCell>(c => c.HasArrayFormula && !RangeAddress.ContainsWhole(c.FormulaReference)))
                     throw new InvalidOperationException("Can't create array function that partially covers another array function.");
 
-                var arrayFormula = XLCellFormula.Array(value, range, false);
+                var formula = value.TrimFormulaEqual();
+                var fixedFunctionsFormula = FormulaTransformation.FixFutureFunctions(formula, Worksheet.Name, SheetRange.FirstPoint);
+                var arrayFormula = XLCellFormula.Array(fixedFunctionsFormula, range, false);
 
                 var formulaSlice = Worksheet.Internals.CellsCollection.FormulaSlice;
                 formulaSlice.SetArray(range, arrayFormula);
@@ -165,19 +168,6 @@ namespace ClosedXML.Excel
         public Boolean ShareString
         {
             set { Cells().ForEach(c => c.ShareString = value); }
-        }
-
-        public IXLHyperlinks Hyperlinks
-        {
-            get
-            {
-                var hyperlinks = new XLHyperlinks();
-                var hls = from hl in Worksheet.Hyperlinks
-                          where RangeAddress.Contains(hl.Cell.Address)
-                          select hl;
-                hls.ForEach(hyperlinks.Add);
-                return hyperlinks;
-            }
         }
 
         public XLCellValue Value
@@ -1419,9 +1409,6 @@ namespace ClosedXML.Excel
 
             var mergesToRemove = Worksheet.Internals.MergedRanges.Where(Contains).ToList();
             mergesToRemove.ForEach(r => Worksheet.Internals.MergedRanges.Remove(r));
-
-            var hyperlinksToRemove = Worksheet.Hyperlinks.Where(hl => Contains(hl.Cell.AsRange())).ToList();
-            hyperlinksToRemove.ForEach(hl => Worksheet.Hyperlinks.Delete(hl));
 
             var shiftedRange = AsRange();
             if (shiftDeleteCells == XLShiftDeletedCells.ShiftCellsUp)

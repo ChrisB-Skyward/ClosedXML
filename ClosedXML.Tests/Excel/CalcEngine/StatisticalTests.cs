@@ -11,7 +11,7 @@ namespace ClosedXML.Tests.Excel.CalcEngine
     [TestFixture]
     public class StatisticalTests
     {
-        private double tolerance = 1e-6;
+        private const double tolerance = 1e-6;
         private XLWorkbook workbook;
 
         [Test]
@@ -25,7 +25,51 @@ namespace ClosedXML.Tests.Excel.CalcEngine
             value = (double)ws.Evaluate("AVERAGE(G3:G45)");
             Assert.AreEqual(49.3255814, value, tolerance);
 
-            Assert.That(() => ws.Evaluate("AVERAGE(D3:D45)"), Throws.TypeOf<ApplicationException>());
+            // Column D contains only strings - no average, because non-number types are skipped
+            Assert.AreEqual(XLError.DivisionByZero, ws.Evaluate("AVERAGE(D3:D45)"));
+
+            // Non-numbers in array are skipped instead of being converted
+            Assert.AreEqual(-1, ws.Evaluate("AVERAGE({FALSE, TRUE, \"1\", \"0 0/2\", -1})"));
+
+            // Blank value in references are skipped
+            ws.Cell("Z1").Value = Blank.Value;
+            Assert.AreEqual(1, ws.Evaluate("AVERAGE(Z1,1)"));
+
+            AssertScalarToNumberConversion("AVERAGE", 0.5);
+            AssertAnyErrorIsPropagated("AVERAGE");
+        }
+
+        [Test]
+        public void AverageA()
+        {
+            using var wb = new XLWorkbook();
+            var ws = wb.AddWorksheet();
+
+            // Examples from specification
+            ws.Cell("E1").Value = Blank.Value;
+            Assert.AreEqual(10, ws.Evaluate("AVERAGEA(10, E1)"));
+            ws.Cell("E2").Value = true;
+            Assert.AreEqual(5.5, ws.Evaluate("AVERAGEA(10, E2)"));
+            ws.Cell("E3").Value = false;
+            Assert.AreEqual(5, ws.Evaluate("AVERAGEA(10, E3)"));
+
+            // Array logical arguments are ignored
+            Assert.AreEqual(2, workbook.Evaluate("AVERAGEA({2,TRUE,TRUE,FALSE,FALSE})"));
+
+            // Array text arguments are counted as zero (4+2+0+0)/4
+            Assert.AreEqual(1.5, workbook.Evaluate("AVERAGEA({4, 2, \"hello\", \"10\" })"));
+
+            // Reference argument only counts logical as 0/1, text as 0 and ignores blanks.
+            ws.Cell("Z1").Value = Blank.Value; // Not counted
+            ws.Cell("Z2").Value = true; // 1
+            ws.Cell("Z3").Value = "100"; // 0
+            ws.Cell("Z4").Value = "hello"; // 0
+            ws.Cell("Z5").Value = 0; // 0
+            ws.Cell("Z6").Value = 4; // 4
+            Assert.AreEqual(1, (double)ws.Evaluate("AVERAGEA(Z1:Z6)"));
+
+            AssertScalarToNumberConversion("AVERAGEA", 0.5);
+            AssertAnyErrorIsPropagated("AVERAGEA");
         }
 
         [TestCase(6, 10, 0.5, 0.205078125)]
@@ -81,17 +125,40 @@ namespace ClosedXML.Tests.Excel.CalcEngine
         {
             var ws = workbook.Worksheets.First();
             XLCellValue value;
-            value = ws.Evaluate(@"=COUNT(D3:D45)");
+            value = ws.Evaluate("COUNT(D3:D45)");
             Assert.AreEqual(0, value);
 
-            value = ws.Evaluate(@"=COUNT(G3:G45)");
+            value = ws.Evaluate("COUNT(G3:G45)");
             Assert.AreEqual(43, value);
 
-            value = ws.Evaluate(@"=COUNT(G:G)");
+            value = ws.Evaluate("COUNT(G:G)");
             Assert.AreEqual(43, value);
 
-            value = workbook.Evaluate(@"=COUNT(Data!G:G)");
+            value = workbook.Evaluate("COUNT(Data!G:G)");
             Assert.AreEqual(43, value);
+
+            // Scalar blank, logical and text is counted as numbers
+            Assert.AreEqual(4, ws.Evaluate("COUNT(IF(TRUE,,),TRUE, FALSE, \"1\")"));
+
+            // Non-number values in arrays are not counted as numbers.
+            Assert.AreEqual(0, ws.Evaluate("COUNT({TRUE,FALSE,\"1\"})"));
+
+            // Text is not counted as number.
+            Assert.AreEqual(0, ws.Evaluate("COUNT(\"Hello\")"));
+
+            // Blank cells are not counted as numbers
+            ws.Cell("Z1").Value = Blank.Value;
+            Assert.AreEqual(0, ws.Evaluate("COUNT(Z1)"));
+
+            // Scalar errors are not propagated
+            Assert.AreEqual(1, ws.Evaluate("COUNT(1, #NULL!)"));
+
+            // Array errors are not propagated
+            Assert.AreEqual(1, ws.Evaluate("COUNT({1, #NULL!})"));
+
+            // Reference errors are not propagated
+            ws.Cell("Z1").Value = XLError.NullValue;
+            Assert.AreEqual(0, ws.Evaluate("COUNT(Z1)"));
         }
 
         [Test]
@@ -184,23 +251,35 @@ namespace ClosedXML.Tests.Excel.CalcEngine
         [Test]
         public void CountBlank()
         {
-            var ws = workbook.Worksheets.First();
-            XLCellValue value;
-            value = ws.Evaluate(@"=COUNTBLANK(B:B)");
-            Assert.AreEqual(1048532, value);
+            using var wb = new XLWorkbook();
+            var ws = wb.AddWorksheet();
+            ws.Cell("A1").Value = Blank.Value;
+            ws.Cell("A2").Value = 0;
+            ws.Cell("A3").Value = 1;
+            ws.Cell("A4").Value = false;
+            ws.Cell("A5").Value = true;
+            ws.Cell("A6").Value = "";
+            ws.Cell("A7").Value = "Text";
+            ws.Cell("A8").Value = XLError.DivisionByZero;
 
-            value = ws.Evaluate(@"=COUNTBLANK(D43:D49)");
-            Assert.AreEqual(4, value);
+            // Blank and empty text value is counted as blank
+            Assert.AreEqual(1, ws.Evaluate("COUNTBLANK(A1)"));
+            Assert.AreEqual(string.Empty, ws.Cell("A6").Value);
+            Assert.AreEqual(1, ws.Evaluate("COUNTBLANK(A6)"));
 
-            value = ws.Evaluate(@"=COUNTBLANK(E3:E45)");
-            Assert.AreEqual(0, value);
+            // Anything else isn't counted as blank
+            Assert.AreEqual(2, ws.Evaluate("COUNTBLANK(A1:A8)"));
 
-            value = ws.Evaluate(@"=COUNTBLANK(A1)");
-            Assert.AreEqual(1, value);
+            Assert.AreEqual(17179869178d, ws.Evaluate("COUNTBLANK(A:XFD)"));
 
-            Assert.Throws<MissingContextException>(() => workbook.Evaluate(@"=COUNTBLANK(E3:E45)"));
-            Assert.Throws<ExpressionParseException>(() => ws.Evaluate(@"=COUNTBLANK()"));
-            Assert.Throws<ExpressionParseException>(() => ws.Evaluate(@"=COUNTBLANK(A3:A45,E3:E45)"));
+            // Check that all others argument types. The Excel grammar doesn't allow that,
+            // so use IF workaround for that.
+            Assert.AreEqual(XLError.IncompatibleValue, ws.Evaluate("COUNTBLANK(IF(TRUE,))")); // Blank
+            Assert.AreEqual(XLError.IncompatibleValue, ws.Evaluate("COUNTBLANK(IF(TRUE,FALSE))")); // Logical
+            Assert.AreEqual(XLError.IncompatibleValue, ws.Evaluate("COUNTBLANK(IF(TRUE,1))")); // Number
+            Assert.AreEqual(XLError.IncompatibleValue, ws.Evaluate("COUNTBLANK(IF(TRUE,\"\"))")); // Text
+            Assert.AreEqual(XLError.DivisionByZero, ws.Evaluate("COUNTBLANK(IF(TRUE,#DIV/0!))")); // Error
+            Assert.AreEqual(XLError.IncompatibleValue, ws.Evaluate("COUNTBLANK(IF(TRUE,{1}))")); // Array
         }
 
         [Test]
@@ -279,15 +358,13 @@ namespace ClosedXML.Tests.Excel.CalcEngine
 
         [TestCase("=COUNTIFS(B1:D1, \"=Yes\")", 1)]
         [TestCase("=COUNTIFS(B1:B4, \"=Yes\", C1:C4, \"=Yes\")", 2)]
-        [TestCase("= COUNTIFS(B4:D4, \"=Yes\", B2:D2, \"=Yes\")", 1)]
+        [TestCase("=COUNTIFS(B4:D4, \"=Yes\", B2:D2, \"=Yes\")", 1)]
         public void CountIfs_ReferenceExample1FromExcelDocumentations(
             string formula,
             int expectedOutcome)
         {
             using (var wb = new XLWorkbook())
             {
-                wb.ReferenceStyle = XLReferenceStyle.A1;
-
                 var ws = wb.AddWorksheet("Sheet1");
 
                 ws.Cell(1, 1).Value = "Davidoski";
@@ -345,35 +422,81 @@ namespace ClosedXML.Tests.Excel.CalcEngine
             Assert.AreEqual(expectedResult, value);
         }
 
+        [TestCase("COUNTIFS(H1:I3, 1, D1:F2, 2)")]
+        [TestCase("COUNTIFS(A:B, \"A*\", C:C, \">2\")")]
+        public void CountIfs_returns_error_when_areas_dimensions_are_different(string formula)
+        {
+            using var wb = new XLWorkbook();
+            var ws = wb.AddWorksheet();
+            Assert.AreEqual(XLError.IncompatibleValue, ws.Evaluate(formula));
+        }
+
         [OneTimeTearDown]
         public void Dispose()
         {
             workbook.Dispose();
         }
 
-        [TestCase(@"H3:H45", ExpectedResult = 7.51126069234216)]
-        [TestCase(@"H:H", ExpectedResult = 7.51126069234216)]
-        [TestCase(@"Data!H:H", ExpectedResult = 7.51126069234216)]
-        [TestCase(@"H3:H10", ExpectedResult = 5.26214814727941)]
-        [TestCase(@"H3:H20", ExpectedResult = 7.01281435054797)]
-        [TestCase(@"H3:H30", ExpectedResult = 7.00137389296182)]
-        [TestCase(@"H3:H3", ExpectedResult = 1.99)]
-        [TestCase(@"H10:H20", ExpectedResult = 8.37855107505682)]
-        [TestCase(@"H15:H20", ExpectedResult = 15.8927310267677)]
-        [TestCase(@"H20:H30", ExpectedResult = 7.14321227391814)]
+        [TestCase("H3:H45", ExpectedResult = 7.51126069234216)]
+        [TestCase("H:H", ExpectedResult = 7.51126069234216)]
+        [TestCase("Data!H:H", ExpectedResult = 7.51126069234216)]
+        [TestCase("H3:H10", ExpectedResult = 5.26214814727941)]
+        [TestCase("H3:H20", ExpectedResult = 7.01281435054797)]
+        [TestCase("H3:H30", ExpectedResult = 7.00137389296182)]
+        [TestCase("H3:H3", ExpectedResult = 1.99)]
+        [TestCase("H10:H20", ExpectedResult = 8.37855107505682)]
+        [TestCase("H15:H20", ExpectedResult = 15.8927310267677)]
+        [TestCase("H20:H30", ExpectedResult = 7.14321227391814)]
         [DefaultFloatingPointTolerance(1e-12)]
-        public double Geomean(string sourceValue)
+        public double Geomean_calculation(string sourceValue)
         {
-            return (double)workbook.Worksheets.First().Evaluate($"=GEOMEAN({sourceValue})");
+            return (double)workbook.Worksheets.First().Evaluate($"GEOMEAN({sourceValue})");
         }
 
         [TestCase("D3:D45", ExpectedResult = XLError.NumberInvalid)]
         [TestCase("-1, 0, 3", ExpectedResult = XLError.NumberInvalid)]
+        [TestCase("0", ExpectedResult = XLError.NumberInvalid)]
         public XLError Geomean_IncorrectCases(string sourceValue)
         {
             var ws = workbook.Worksheets.First();
 
             return (XLError)ws.Evaluate($"GEOMEAN({sourceValue})");
+        }
+
+        [Test]
+        [DefaultFloatingPointTolerance(1e-8)]
+        public void Geomean()
+        {
+            // Example from the specification
+            Assert.AreEqual(5.4444547024966, (double)XLWorkbook.EvaluateExpr("GEOMEAN(10.5,5.3,2.9)"));
+            Assert.AreEqual(6.6337805880630, (double)XLWorkbook.EvaluateExpr("GEOMEAN(10.5,{5.3,2.9},\"12\")"));
+
+            // GEOMEAN isn't limited by double scale, i.e. it doesn't use naive algorithm for large number.
+            Assert.AreEqual(1.0000000000000231E+307d, (double)XLWorkbook.EvaluateExpr("GEOMEAN(1E+307, 1E+307)"));
+
+            // Scalar blank is counted as a 0
+            Assert.AreEqual(XLError.NumberInvalid, XLWorkbook.EvaluateExpr("GEOMEAN(IF(TRUE,), 1)"));
+
+            // Scalar logical and text is converted to numbers
+            Assert.AreEqual(2.236067977, (double)XLWorkbook.EvaluateExpr("GEOMEAN(TRUE, \"5\")"));
+
+            // Non-number values in arrays are ignored.
+            Assert.AreEqual(5.916079783, (double)XLWorkbook.EvaluateExpr("GEOMEAN({TRUE, FALSE, \"1\", 7}, 5)"));
+
+            // Scalar non-number text causes an error due to conversion.
+            Assert.AreEqual(XLError.IncompatibleValue, XLWorkbook.EvaluateExpr("GEOMEAN(\"Hello\", 5)"));
+
+            // Reference non-number arguments are ignored
+            var ws = workbook.Worksheets.First();
+            ws.Cell("Z1").Value = Blank.Value;
+            ws.Cell("Z2").Value = "1";
+            ws.Cell("Z3").Value = "hello";
+            ws.Cell("Z4").Value = false;
+            ws.Cell("Z5").Value = true;
+            ws.Cell("Z6").Value = 5;
+            Assert.AreEqual(5, (double)ws.Evaluate("GEOMEAN(Z1:Z6)"));
+
+            AssertAnyErrorIsPropagated("GEOMEAN");
         }
 
         [SetUp]
@@ -397,15 +520,44 @@ namespace ClosedXML.Tests.Excel.CalcEngine
         [DefaultFloatingPointTolerance(1e-10)]
         public double DevSq(string sourceValue)
         {
-            return (double)workbook.Worksheets.First().Evaluate($"=DEVSQ({sourceValue})");
+            return (double)workbook.Worksheets.First().Evaluate($"DEVSQ({sourceValue})");
         }
 
-        [TestCase("D3:D45", ExpectedResult = XLError.IncompatibleValue)]
+        [TestCase("D3:D45", ExpectedResult = XLError.NumberInvalid)]
         public XLError Devsq_IncorrectCases(string sourceValue)
         {
             var ws = workbook.Worksheets.First();
 
             return (XLError)ws.Evaluate($"DEVSQ({sourceValue})");
+        }
+
+        [Test]
+        [DefaultFloatingPointTolerance(1e-10)]
+        public void Devsq_is_calculated_from_numbers()
+        {
+            Assert.AreEqual(6.90666666666666, (double)XLWorkbook.EvaluateExpr("DEVSQ(5.6, 8.2, 9.2)"));
+            Assert.AreEqual(6.90666666666666, (double)XLWorkbook.EvaluateExpr("DEVSQ({ 5.6, 8.2, 9.2})"));
+
+            // Array logical arguments are ignored
+            Assert.AreEqual(0, workbook.Evaluate("DEVSQ({2,TRUE,TRUE,FALSE,FALSE})"));
+            Assert.AreEqual(2.8, (double)workbook.Evaluate("DEVSQ({2, 1, 1, 0, 0})"));
+
+            // Array text arguments are ignored
+            Assert.AreEqual(2, workbook.Evaluate("DEVSQ({4, 2, \"hello\", \"10\" })"));
+
+            // Non-numerical reference values are ignored.
+            using var wb = new XLWorkbook();
+            var ws = wb.AddWorksheet();
+            ws.Cell("A1").Value = Blank.Value; // Ignored
+            ws.Cell("A2").Value = true; // Ignored
+            ws.Cell("A3").Value = "100"; // Ignored
+            ws.Cell("A4").Value = "hello"; // Ignored
+            ws.Cell("A5").Value = 2; // Included
+            ws.Cell("A6").Value = 4; // Included
+            Assert.AreEqual(2, ws.Evaluate("DEVSQ(A1:A6)"));
+
+            AssertScalarToNumberConversion("DEVSQ", 0.5);
+            AssertAnyErrorIsPropagated("DEVSQ");
         }
 
         [TestCase(0, ExpectedResult = 0)]
@@ -424,8 +576,7 @@ namespace ClosedXML.Tests.Excel.CalcEngine
             return (double)XLWorkbook.EvaluateExpr($"FISHER({sourceValue})");
         }
 
-        // TODO : the string case will be treated correctly when Coercion is implemented better
-        //[TestCase("asdf", ExpectedResult = XLError.IncompatibleValue)]
+        [TestCase("\"asdf\"", ExpectedResult = XLError.IncompatibleValue)]
         [TestCase("5", ExpectedResult = XLError.NumberInvalid)]
         [TestCase("-1", ExpectedResult = XLError.NumberInvalid)]
         [TestCase("1", ExpectedResult = XLError.NumberInvalid)]
@@ -455,22 +606,6 @@ namespace ClosedXML.Tests.Excel.CalcEngine
             value = workbook.Evaluate(@"MAX(-10, Data!X:Z)");
             Assert.AreEqual(-10, value);
 
-            // Blanks are not ignored as a value, only in references.
-            value = workbook.Evaluate(@"MAX(-10, IF(TRUE,,))");
-            Assert.AreEqual(0, value);
-
-            // Logical are converted
-            value = workbook.Evaluate(@"MAX(-10, TRUE)");
-            Assert.AreEqual(1, value);
-
-            // Numbers texts are converted
-            value = workbook.Evaluate(@"MAX(-10, ""10"")");
-            Assert.AreEqual(10, value);
-
-            // Non-number texts cause conversion error
-            value = workbook.Evaluate(@"MAX(-10, ""a"")");
-            Assert.AreEqual(XLError.IncompatibleValue, value);
-
             // Arrays - numbers are used
             value = workbook.Evaluate(@"MAX(-10, { -6, -5, 7 })");
             Assert.AreEqual(7, value);
@@ -479,22 +614,59 @@ namespace ClosedXML.Tests.Excel.CalcEngine
             value = workbook.Evaluate(@"MAX(-10, { TRUE, FALSE, ""100"" })");
             Assert.AreEqual(-10, value);
 
-            // Arrays - errors immediately end evaluation.
-            value = workbook.Evaluate(@"MAX(-10, {#N/A})");
-            Assert.AreEqual(XLError.NoValueAvailable, value);
+            // Reference argument ignores everything but number.
+            ws.Cell("Z1").Value = Blank.Value;
+            ws.Cell("Z2").Value = true;
+            ws.Cell("Z3").Value = "100";
+            ws.Cell("Z4").Value = "hello";
+            ws.Cell("Z5").Value = -4;
+            Assert.AreEqual(-4, ws.Evaluate("MAX(Z1:Z5)"));
+
+            AssertScalarToNumberConversion("MAX", 1);
+            AssertAnyErrorIsPropagated("MAX");
         }
 
         [Test]
-        public void Median_CellRangeOfNonNumericValues_ThrowsApplicationException()
+        public void MaxA()
         {
-            //Arrange
+            using var wb = new XLWorkbook();
+            var ws = wb.AddWorksheet();
+
+            // Examples from specification
+            Assert.AreEqual(12.6, ws.Evaluate("MAXA(10.4,-3.5,12.6)"));
+            Assert.AreEqual(12.6, ws.Evaluate("MAXA(10.4,{-3.5,12.6})"));
+            Assert.AreEqual(0, ws.Evaluate("MAXA({\"ABC\",TRUE})"));
+            ws.Cell("B3").Value = Blank.Value;
+            Assert.AreEqual(-10, ws.Evaluate("MAX(-10,-12,-15,B3)"));
+            ws.Cell("B3").Value = 0;
+            Assert.AreEqual(0, ws.Evaluate("MAXA(-10,-12,-15,B3)"));
+
+            // Array logical arguments are ignored
+            Assert.AreEqual(-2, workbook.Evaluate("MAXA({-2, TRUE, TRUE, FALSE, FALSE})"));
+
+            // Array text arguments are ignored
+            Assert.AreEqual(-2, workbook.Evaluate("MAXA({-4, -2, \"hello\", \"10\" })"));
+
+            // Reference argument only counts logical as 0/1, text as 0 and ignores blanks.
+            ws.Cell("A1").Value = Blank.Value;
+            ws.Cell("A2").Value = true;
+            ws.Cell("A3").Value = "100";
+            ws.Cell("A4").Value = "hello";
+            ws.Cell("A5").Value = -4;
+            Assert.AreEqual(1, ws.Evaluate("MAXA(A1:A5)"));
+            Assert.AreEqual(0, ws.Evaluate("MAXA(A3:A5)"));
+
+            AssertScalarToNumberConversion("MAXA", 1);
+            AssertAnyErrorIsPropagated("MAXA");
+        }
+
+        [Test]
+        public void Median_with_area_without_numeric_values_returns_error()
+        {
             var ws = workbook.Worksheets.First();
 
-            //Act - Assert
-            Assert.Throws<ApplicationException>(() =>
-            {
-                ws.Evaluate("AVERAGE(D3:D45)");
-            });
+            // Column D contains names of regions
+            Assert.AreEqual(XLError.NumberInvalid, ws.Evaluate("MEDIAN(D3:D45)"));
         }
 
         [Test]
@@ -544,55 +716,241 @@ namespace ClosedXML.Tests.Excel.CalcEngine
         }
 
         [Test]
-        public void Min()
+        public void Median_uses_only_numbers()
         {
-            var ws = workbook.Worksheets.First();
-            XLCellValue value;
-            value = ws.Evaluate(@"=MIN(D3:D45)");
-            Assert.AreEqual(0, value);
+            var wb = new XLWorkbook();
+            var ws = wb.AddWorksheet();
 
-            value = ws.Evaluate(@"=MIN(G3:G45)");
-            Assert.AreEqual(2, value);
+            // Examples from specification
+            Assert.AreEqual(15, ws.Evaluate("MEDIAN(10, 20)"));
+            Assert.AreEqual(-1.05, ws.Evaluate("MEDIAN(-3.5, 1.4, 6.9, -4.5)"));
+            Assert.AreEqual(-1.05, ws.Evaluate("MEDIAN({ -3.5,1.4,6.9},-4.5)"));
 
-            value = ws.Evaluate(@"=MIN(G:G)");
-            Assert.AreEqual(2, value);
+            // Reference with no value will return error
+            ws.Cell("A1").Value = Blank.Value;
+            Assert.AreEqual(XLError.NumberInvalid, ws.Evaluate("MEDIAN(A1)"));
 
-            value = workbook.Evaluate(@"=MIN(Data!G:G)");
-            Assert.AreEqual(2, value);
+            // Array non-number values are ignored
+            Assert.AreEqual(7, ws.Evaluate("MEDIAN({7, TRUE,FALSE,\"1\"})"));
+
+            // Only numbers are used from reference, rest is ignored
+            ws.Cell("A1").Value = Blank.Value;
+            ws.Cell("A2").Value = true;
+            ws.Cell("A3").Value = "100";
+            ws.Cell("A4").Value = "hello";
+            ws.Cell("A5").Value = 0;
+            ws.Cell("A6").Value = 4;
+            ws.Cell("A7").Value = 5;
+            Assert.AreEqual(4, ws.Evaluate("MEDIAN(A1:A7)"));
+
+            AssertScalarToNumberConversion("MEDIAN", 0.5);
+            AssertAnyErrorIsPropagated("MEDIAN");
         }
 
         [Test]
+        public void Min()
+        {
+            var ws = workbook.Worksheets.First();
+            Assert.AreEqual(0, ws.Evaluate("MIN(D3:D45)"));
+            Assert.AreEqual(2, ws.Evaluate("MIN(G3:G45)"));
+            Assert.AreEqual(2, ws.Evaluate("MIN(G:G)"));
+            Assert.AreEqual(2, workbook.Evaluate("MIN(Data!G:G)"));
+
+            // Array non-number arguments are ignored
+            Assert.AreEqual(5, workbook.Evaluate("MIN({5, TRUE, FALSE, \"1\", \"hello\"})"));
+
+            // Reference non-number arguments are ignored
+            ws.Cell("Z1").Value = Blank.Value;
+            ws.Cell("Z2").Value = "1";
+            ws.Cell("Z3").Value = "hello";
+            ws.Cell("Z4").Value = false;
+            ws.Cell("Z5").Value = true;
+            ws.Cell("Z6").Value = 5;
+            Assert.AreEqual(5, ws.Evaluate("MIN(Z1:Z6)"));
+
+            // If there is no value, return 0
+            Assert.AreEqual(0, ws.Evaluate("MIN({\"hello\"})"));
+
+            AssertScalarToNumberConversion("MIN", 0);
+            AssertAnyErrorIsPropagated("MIN");
+        }
+
+        [Test]
+        public void MinA()
+        {
+            using var wb = new XLWorkbook();
+            var ws = wb.AddWorksheet();
+
+            // Examples from specification
+            Assert.AreEqual(-3.5, ws.Evaluate("MINA(10.4, -3.5, 12.6)"));
+            Assert.AreEqual(-3.5, ws.Evaluate("MINA(10.4, {-3.5, 12.6})"));
+            Assert.AreEqual(0, ws.Evaluate("MINA({\"ABC\", TRUE})"));
+            ws.Cell("B3").Value = Blank.Value;
+            Assert.AreEqual(10, ws.Evaluate("MINA(10, 12, 15, B3)"));
+            ws.Cell("B3").Value = "Text";
+            Assert.AreEqual(0, ws.Evaluate("MINA(10, 12, 15, B3)"));
+
+            // Blanks in references are ignored and when MINA doesn't have any values, it returns 0
+            ws.Cell("A1").Value = Blank.Value;
+            Assert.AreEqual(0, ws.Evaluate("MINA(A1)"));
+
+            // Array logical arguments are ignored
+            Assert.AreEqual(2, wb.Evaluate("MINA({2, TRUE, TRUE, FALSE, FALSE})"));
+
+            // Array text arguments are ignored
+            Assert.AreEqual(2, wb.Evaluate("MINA({4, 2, \"hello\", \"1\"})"));
+
+            // Reference argument only counts logical as 0/1, text as 0 and ignores blanks.
+            ws.Cell("A1").Value = Blank.Value; // Ignores
+            ws.Cell("A2").Value = true; // Includes
+            ws.Cell("A3").Value = "100"; // Considers 0
+            ws.Cell("A4").Value = "hello"; // Considers 0
+            ws.Cell("A5").Value = -4; // Included
+            Assert.AreEqual(1, ws.Evaluate("MINA(A1:A2)"));
+            Assert.AreEqual(0, ws.Evaluate("MINA(A1:A3)"));
+            Assert.AreEqual(-4, ws.Evaluate("MINA(A1:A5)"));
+
+            AssertScalarToNumberConversion("MINA", 0);
+            AssertAnyErrorIsPropagated("MINA");
+        }
+
+        [Test]
+        [DefaultFloatingPointTolerance(tolerance)]
         public void StDev()
         {
             var ws = workbook.Worksheets.First();
-            double value;
-            Assert.That(() => ws.Evaluate(@"=STDEV(D3:D45)"), Throws.TypeOf<ApplicationException>());
 
-            value = (double)ws.Evaluate(@"=STDEV(H3:H45)");
+            // Only non-convertible text in D column, thus less than 2 samples will return error
+            Assert.AreEqual(XLError.DivisionByZero, ws.Evaluate("STDEV(D3:D45)"));
+
+            // Calculate StDev from numeric values (reference contains only numbers)
+            var value = (double)ws.Evaluate("STDEV(H3:H45)");
             Assert.AreEqual(47.34511769, value, tolerance);
 
-            value = (double)ws.Evaluate(@"=STDEV(H:H)");
+            // Ignores text values in the H column and only uses numeric ones, same as reference with only number
+            value = (double)ws.Evaluate("STDEV(H:H)");
             Assert.AreEqual(47.34511769, value, tolerance);
 
-            value = (double)workbook.Evaluate(@"=STDEV(Data!H:H)");
+            value = (double)workbook.Evaluate("STDEV(Data!H:H)");
             Assert.AreEqual(47.34511769, value, tolerance);
+
+            // Need at least two values, otherwise returns error
+            Assert.AreEqual(XLError.DivisionByZero, workbook.Evaluate("STDEV(1)"));
+            Assert.AreEqual(0, workbook.Evaluate("STDEV(0, 0)"));
+
+            // Array non-number arguments are ignored
+            Assert.AreEqual(0.707106781, (double)workbook.Evaluate("STDEV({0, 1, \"Hello\", FALSE, TRUE})"), tolerance);
+
+            // Reference argument only uses number, ignores blanks, logical and text
+            ws.Cell("Z1").Value = Blank.Value;
+            ws.Cell("Z2").Value = true;
+            ws.Cell("Z3").Value = "100";
+            ws.Cell("Z4").Value = "hello";
+            ws.Cell("Z5").Value = 0;
+            ws.Cell("Z6").Value = 1;
+            Assert.AreEqual(0.707106781, (double)ws.Evaluate("STDEV(Z1:Z6)"), tolerance);
+
+            AssertScalarToNumberConversion("STDEV", 0.707106781);
+            AssertAnyErrorIsPropagated("STDEV");
+        }
+
+        [Test]
+        [DefaultFloatingPointTolerance(tolerance)]
+        public void StDevA()
+        {
+            using var wb = new XLWorkbook();
+            var ws = wb.AddWorksheet();
+
+            // Example from specification
+            Assert.AreEqual(23.72902583, (double)ws.Evaluate("STDEVA(123, 134, 143, 173, 112, 109)"));
+
+            // Array non-number arguments are ignored
+            Assert.AreEqual(0.707106781, (double)ws.Evaluate("STDEVA({0, 1, \"9\", \"Hello\", FALSE, TRUE})"));
+
+            // Reference argument ignores blanks, uses numbers, logical and text as zero
+            ws.Cell("A1").Value = Blank.Value; // Ignore
+            ws.Cell("A2").Value = true; // Include
+            ws.Cell("A3").Value = ""; // Consider 0
+            ws.Cell("A4").Value = "100"; // Consider 0
+            ws.Cell("A5").Value = "hello"; // Consider 0
+            ws.Cell("A6").Value = 5;
+            ws.Cell("A7").Value = 7;
+            Assert.AreEqual(3.060501048, (double)ws.Evaluate("STDEVA(A1:A7)"));
+
+            // Need at least one sample, otherwise returns error (text in array is ignored)
+            Assert.AreEqual(XLError.DivisionByZero, ws.Evaluate("STDEVA({\"hello\"})"));
+
+            AssertScalarToNumberConversion("STDEVA", 0.707106781);
+            AssertAnyErrorIsPropagated("STDEVA");
         }
 
         [Test]
         public void StDevP()
         {
             var ws = workbook.Worksheets.First();
-            double value;
-            Assert.That(() => ws.Evaluate(@"=STDEVP(D3:D45)"), Throws.InvalidOperationException);
 
-            value = (double)ws.Evaluate(@"=STDEVP(H3:H45)");
-            Assert.AreEqual(46.79135458, value, tolerance);
+            // Example from specification
+            Assert.AreEqual(21.66153785, (double)ws.Evaluate("STDEVP(123, 134, 143, 173, 112, 109)"), tolerance);
 
-            value = (double)ws.Evaluate(@"=STDEVP(H:H)");
-            Assert.AreEqual(46.79135458, value, tolerance);
+            // Column D contains only region names (non-convertible text), thus reference contains less than 1 sample that is required
+            Assert.AreEqual(XLError.DivisionByZero, ws.Evaluate("STDEVP(D3:D45)"));
 
-            value = (double)workbook.Evaluate(@"=STDEVP(Data!H:H)");
-            Assert.AreEqual(46.79135458, value, tolerance);
+            // Calculate StDevP from numeric values (reference contains only numbers)
+            Assert.AreEqual(46.79135458, (double)ws.Evaluate("STDEVP(H3:H45)"), tolerance);
+
+            // StDevP ignores text values/blanks in the H column and only uses numeric ones, the result is same as the reference above that contains only numbers
+            Assert.AreEqual(46.79135458, (double)ws.Evaluate("STDEVP(H:H)"), tolerance);
+
+            Assert.AreEqual(46.79135458, (double)workbook.Evaluate("STDEVP(Data!H:H)"), tolerance);
+
+            // If sample size is 0, return error
+            Assert.AreEqual(XLError.DivisionByZero, workbook.Evaluate("STDEVP({TRUE})"));
+            Assert.AreEqual(0, workbook.Evaluate("STDEVP(100)"));
+
+            // Array non-number arguments are ignored
+            Assert.AreEqual(0.5, workbook.Evaluate("STDEVP({0, 1, \"Hello\", FALSE, TRUE})"));
+
+            // Reference argument only uses numbers, ignores blanks, logical and text
+            ws.Cell("Z1").Value = Blank.Value;
+            ws.Cell("Z2").Value = true;
+            ws.Cell("Z3").Value = "100";
+            ws.Cell("Z4").Value = "hello";
+            ws.Cell("Z5").Value = 0;
+            ws.Cell("Z6").Value = 1;
+            Assert.AreEqual(0.5, ws.Evaluate("STDEVP(Z1:Z6)"));
+
+            AssertScalarToNumberConversion("STDEVP", 0.5);
+            AssertAnyErrorIsPropagated("STDEVP");
+        }
+
+        [Test]
+        [DefaultFloatingPointTolerance(tolerance)]
+        public void StDevPA()
+        {
+            using var wb = new XLWorkbook();
+            var ws = wb.AddWorksheet();
+
+            // Example from specification
+            Assert.AreEqual(21.66153785, (double)ws.Evaluate("STDEVPA(123, 134, 143, 173, 112, 109)"));
+
+            // Array non-number arguments are ignored
+            Assert.AreEqual(0.5, (double)ws.Evaluate("STDEVPA({0, 1, \"9\", \"Hello\", FALSE, TRUE})"));
+
+            // Reference argument ignores blanks, uses numbers, logical and text as zero
+            ws.Cell("A1").Value = Blank.Value; // Ignore
+            ws.Cell("A2").Value = true; // Include
+            ws.Cell("A3").Value = ""; // Consider 0
+            ws.Cell("A4").Value = "100"; // Consider 0
+            ws.Cell("A5").Value = "hello"; // Consider 0
+            ws.Cell("A6").Value = 5;
+            ws.Cell("A7").Value = 7;
+            Assert.AreEqual(2.793842436, (double)ws.Evaluate("STDEVPA(A1:A7)"));
+
+            // Need at least one sample, otherwise returns error (text in array is ignored)
+            Assert.AreEqual(XLError.DivisionByZero, ws.Evaluate("STDEVPA({\"hello\"})"));
+
+            AssertScalarToNumberConversion("STDEVPA", 0.5);
+            AssertAnyErrorIsPropagated("STDEVPA");
         }
 
         [TestCase(@"=SUMIF(A1:A10, 1, A1:A10)", 1)]
@@ -609,6 +967,28 @@ namespace ClosedXML.Tests.Excel.CalcEngine
             // LibreOffice Calc handles some SUMIF and COUNTIF differently, e.g. it treats 1 and TRUE as equal, but 3 and "3" differently
             var ws = workbook.Worksheet("MixedData");
             Assert.AreEqual(expected, ws.Evaluate(formula));
+        }
+
+        [Test]
+        public void SumIf_specification_examples()
+        {
+            // Test examples from specification.
+            using var wb = new XLWorkbook();
+            var ws = wb.AddWorksheet();
+            ws.Cell("A1").Value = 3;
+            ws.Cell("B1").Value = 10;
+            ws.Cell("C1").Value = 7;
+            ws.Cell("D1").Value = 10;
+
+            Assert.AreEqual(20, ws.Evaluate("SUMIF(A1:D1,\"=10\")"));
+            Assert.AreEqual(27, ws.Evaluate("SUMIF(A1:D1,\">5\")"));
+            Assert.AreEqual(10, ws.Evaluate("SUMIF(A1:D1,\"<>10\")"));
+
+            ws.Cell("A2").Value = "apples";
+            ws.Cell("B2").Value = "melons";
+            ws.Cell("C2").Value = 10;
+            ws.Cell("D2").Value = 15;
+            Assert.AreEqual(10, ws.Evaluate("SUMIF(A2:B2,\"*es\",C2:D2)"));
         }
 
         [Test]
@@ -642,34 +1022,137 @@ namespace ClosedXML.Tests.Excel.CalcEngine
         public void Var()
         {
             var ws = workbook.Worksheets.First();
-            double value;
-            Assert.That(() => ws.Evaluate(@"=VAR(D3:D45)"), Throws.InvalidOperationException);
 
-            value = (double)ws.Evaluate(@"=VAR(H3:H45)");
-            Assert.AreEqual(2241.560169, value, tolerance);
+            // Example from specification
+            Assert.AreEqual(2683.2, ws.Evaluate("VAR(1202,1220,1323,1254,1302)"));
 
-            value = (double)ws.Evaluate(@"=VAR(H:H)");
-            Assert.AreEqual(2241.560169, value, tolerance);
+            // Only non-convertible text in D column, thus less than 2 samples.
+            Assert.AreEqual(XLError.DivisionByZero, ws.Evaluate("VAR(D3:D45)"));
 
-            value = (double)workbook.Evaluate(@"=VAR(Data!H:H)");
-            Assert.AreEqual(2241.560169, value, tolerance);
+            // Calculate VAR from numeric values (reference contains only numbers)
+            Assert.AreEqual(2241.560169, (double)ws.Evaluate("VAR(H3:H45)"), tolerance);
+
+            // Ignores text values in the H column and only uses numeric ones, same as reference with only number
+            Assert.AreEqual(2241.560169, (double)ws.Evaluate("VAR(H:H)"), tolerance);
+            Assert.AreEqual(2241.560169, (double)workbook.Evaluate("VAR(Data!H:H)"), tolerance);
+
+            // Need at least two samples, otherwise returns error
+            Assert.AreEqual(XLError.DivisionByZero, workbook.Evaluate("VAR({\"hello\"})"));
+            Assert.AreEqual(XLError.DivisionByZero, workbook.Evaluate("VAR(5)"));
+            Assert.AreEqual(0.5, workbook.Evaluate("VAR(5, 6)"));
+
+            // Array non-number arguments are ignored
+            Assert.AreEqual(0.5, workbook.Evaluate("VAR({0, 1, \"Hello\", FALSE, TRUE})"));
+
+            // Reference argument only uses number, ignores blanks, logical and text
+            ws.Cell("Z1").Value = Blank.Value;
+            ws.Cell("Z2").Value = true;
+            ws.Cell("Z3").Value = "100";
+            ws.Cell("Z4").Value = "hello";
+            ws.Cell("Z5").Value = 0;
+            ws.Cell("Z6").Value = 1;
+            Assert.AreEqual(0.5, ws.Evaluate("VAR(Z1:Z6)"));
+
+            AssertScalarToNumberConversion("VAR", 0.5);
+            AssertAnyErrorIsPropagated("VAR");
+        }
+
+        [Test]
+        [DefaultFloatingPointTolerance(tolerance)]
+        public void VarA()
+        {
+            using var wb = new XLWorkbook();
+            var ws = wb.AddWorksheet();
+
+            // Example from specification
+            Assert.AreEqual(2683.2, ws.Evaluate("VARA(1202, 1220, 1323, 1254, 1302)"));
+
+            // Array non-number arguments are ignored
+            Assert.AreEqual(2, ws.Evaluate("VARA({5, 7, \"9\", \"Hello\", FALSE, TRUE})"));
+
+            // Reference argument ignores blanks, uses numbers, logical and text as zero
+            ws.Cell("A1").Value = Blank.Value; // Ignore
+            ws.Cell("A2").Value = true; // Include
+            ws.Cell("A3").Value = ""; // Consider 0
+            ws.Cell("A4").Value = "100"; // Consider 0
+            ws.Cell("A5").Value = "hello"; // Consider 0
+            ws.Cell("A6").Value = 5;
+            ws.Cell("A7").Value = 7;
+            Assert.AreEqual(9.366666667, (double)ws.Evaluate("VARA(A1:A7)"));
+
+            // Need at least one sample, otherwise returns error (text in array is ignored)
+            Assert.AreEqual(XLError.DivisionByZero, ws.Evaluate("VARA({\"hello\"})"));
+
+            AssertScalarToNumberConversion("VARA", 0.5);
+            AssertAnyErrorIsPropagated("VARA");
         }
 
         [Test]
         public void VarP()
         {
             var ws = workbook.Worksheets.First();
-            double value;
-            Assert.That(() => ws.Evaluate(@"=VARP(D3:D45)"), Throws.InvalidOperationException);
 
-            value = (double)ws.Evaluate(@"=VARP(H3:H45)");
-            Assert.AreEqual(2189.430863, value, tolerance);
+            // Example from specification
+            Assert.AreEqual(2146.56, (double)ws.Evaluate("VARP(1202,1220,1323,1254,1302)"), tolerance);
 
-            value = (double)ws.Evaluate(@"=VARP(H:H)");
-            Assert.AreEqual(2189.430863, value, tolerance);
+            // Only non-convertible text in D column, thus less than 1 sample.
+            Assert.AreEqual(XLError.DivisionByZero, ws.Evaluate("VARP(D3:D45)"));
 
-            value = (double)workbook.Evaluate(@"=VARP(Data!H:H)");
-            Assert.AreEqual(2189.430863, value, tolerance);
+            // Calculate VARP from numeric values (reference contains only numbers)
+            Assert.AreEqual(2189.430863, (double)ws.Evaluate("VARP(H3:H45)"), tolerance);
+
+            // Ignores text values in the H column and only uses numeric ones, same as reference with only number
+            Assert.AreEqual(2189.430863, (double)ws.Evaluate("VARP(H:H)"), tolerance);
+            Assert.AreEqual(2189.430863, (double)workbook.Evaluate("VARP(Data!H:H)"), tolerance);
+
+            // Need at least one sample, otherwise returns error
+            Assert.AreEqual(XLError.DivisionByZero, workbook.Evaluate("VARP({\"hello\"})"));
+            Assert.AreEqual(0, workbook.Evaluate("VARP(5)"));
+
+            // Array non-number arguments are ignored
+            Assert.AreEqual(0.25, workbook.Evaluate("VARP({0, 1, \"Hello\", FALSE, TRUE})"));
+
+            // Reference argument only uses number, ignores blanks, logical and text
+            ws.Cell("Z1").Value = Blank.Value;
+            ws.Cell("Z2").Value = true;
+            ws.Cell("Z3").Value = "100";
+            ws.Cell("Z4").Value = "hello";
+            ws.Cell("Z5").Value = 0;
+            ws.Cell("Z6").Value = 1;
+            Assert.AreEqual(0.25, ws.Evaluate("VARP(Z1:Z6)"));
+
+            AssertScalarToNumberConversion("VARP", 0.25);
+            AssertAnyErrorIsPropagated("VARP");
+        }
+
+        [Test]
+        [DefaultFloatingPointTolerance(tolerance)]
+        public void VarPA()
+        {
+            using var wb = new XLWorkbook();
+            var ws = wb.AddWorksheet();
+
+            // Example from specification
+            Assert.AreEqual(2146.56, ws.Evaluate("VARPA(1202, 1220, 1323, 1254, 1302)"));
+
+            // Array non-number arguments are ignored
+            Assert.AreEqual(1, ws.Evaluate("VARPA({5, 7, \"9\", \"Hello\", FALSE, TRUE})"));
+
+            // Reference argument ignores blanks, uses numbers, logical and text as zero
+            ws.Cell("A1").Value = Blank.Value; // Ignore
+            ws.Cell("A2").Value = true; // Include
+            ws.Cell("A3").Value = ""; // Consider 0
+            ws.Cell("A4").Value = "100"; // Consider 0
+            ws.Cell("A5").Value = "hello"; // Consider 0
+            ws.Cell("A6").Value = 5;
+            ws.Cell("A7").Value = 7;
+            Assert.AreEqual(7.805555556, (double)ws.Evaluate("VARPA(A1:A7)"));
+
+            // Need at least one sample, otherwise returns error (text in array is ignored)
+            Assert.AreEqual(XLError.DivisionByZero, ws.Evaluate("VARPA({\"hello\"})"));
+
+            AssertScalarToNumberConversion("VARPA", 0.25);
+            AssertAnyErrorIsPropagated("VARPA");
         }
 
         [Test]
@@ -787,6 +1270,45 @@ namespace ClosedXML.Tests.Excel.CalcEngine
             ws2.FirstCell().InsertData(new object[] { 1, 2.0, "3", 3, new DateTime(2020, 1, 1), true, new TimeSpan(10, 5, 30, 10) });
 
             return wb;
+        }
+
+        private static void AssertScalarToNumberConversion(string functionName, double result)
+        {
+            // Scalar blank is converted to 0
+            Assert.AreEqual(result, (double)XLWorkbook.EvaluateExpr($"{functionName}(IF(TRUE,), 1)"));
+
+            // Scalar logical is converted to a number
+            Assert.AreEqual(result, (double)XLWorkbook.EvaluateExpr($"{functionName}(FALSE, TRUE)"));
+            Assert.AreEqual(result, (double)XLWorkbook.EvaluateExpr($"{functionName}(0, TRUE)"));
+            Assert.AreEqual(result, (double)XLWorkbook.EvaluateExpr($"{functionName}(FALSE, 1)"));
+
+            // Scalar text is converted to a number
+            Assert.AreEqual(result, (double)XLWorkbook.EvaluateExpr($"{functionName}(\"0\", \"1\")"));
+            Assert.AreEqual(result, (double)XLWorkbook.EvaluateExpr($"{functionName}(\"1\", \"0 0/2\")"));
+
+            // Scalar text that is not convertible returns error
+            Assert.AreEqual(XLError.IncompatibleValue, XLWorkbook.EvaluateExpr($"{functionName}(5, \"Hello\")"));
+        }
+
+        /// <summary>
+        /// Assert that a function propagates any error, whether from scalar, array or reference argument.
+        /// </summary>
+        /// <param name="functionName">Name of a function that accepts any value as argument.</param>
+        private static void AssertAnyErrorIsPropagated(string functionName)
+        {
+            // Scalar error is propagated
+            Assert.AreEqual(XLError.NullValue, XLWorkbook.EvaluateExpr($"{functionName}(1, #NULL!)"));
+
+            // Array error is propagated
+            Assert.AreEqual(XLError.NullValue, XLWorkbook.EvaluateExpr($"{functionName}({{1, #NULL!}})"));
+
+            // Reference error is propagated
+            using var wb = new XLWorkbook();
+            var ws = wb.AddWorksheet();
+            ws.Cell("B1").Value = XLError.NoValueAvailable;
+            ws.Cell("B2").Value = 1;
+            Assert.AreEqual(XLError.NoValueAvailable, ws.Evaluate($"{functionName}(B1)"));
+            Assert.AreEqual(XLError.NoValueAvailable, ws.Evaluate($"{functionName}(B1:B2)"));
         }
     }
 }

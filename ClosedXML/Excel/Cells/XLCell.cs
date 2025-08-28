@@ -12,6 +12,8 @@ using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using ClosedXML.Graphics;
+using ClosedXML.Parser;
+using ClosedXML.Excel.CalcEngine.Visitors;
 
 namespace ClosedXML.Excel
 {
@@ -128,36 +130,6 @@ namespace ClosedXML.Excel
                 {
                     var modified = original;
                     modified.Comment = value;
-                    _cellsCollection.MiscSlice.Set(_rowNumber, _columnNumber, in modified);
-                }
-            }
-        }
-
-        private XLHyperlink SliceHyperlink
-        {
-            get => _cellsCollection.MiscSlice[_rowNumber, _columnNumber].Hyperlink;
-            set
-            {
-                ref readonly var original = ref _cellsCollection.MiscSlice[_rowNumber, _columnNumber];
-                if (original.Hyperlink != value)
-                {
-                    var modified = original;
-                    modified.Hyperlink = value;
-                    _cellsCollection.MiscSlice.Set(_rowNumber, _columnNumber, in modified);
-                }
-            }
-        }
-
-        internal bool SettingHyperlink
-        {
-            get => _cellsCollection.MiscSlice[_rowNumber, _columnNumber].SettingHyperlink;
-            set
-            {
-                ref readonly var original = ref _cellsCollection.MiscSlice[_rowNumber, _columnNumber];
-                if (original.SettingHyperlink != value)
-                {
-                    var modified = original;
-                    modified.SettingHyperlink = value;
                     _cellsCollection.MiscSlice.Set(_rowNumber, _columnNumber, in modified);
                 }
             }
@@ -758,16 +730,24 @@ namespace ClosedXML.Excel
 
         public string FormulaA1
         {
-            get => Formula?.GetFormulaA1(SheetPoint) ?? String.Empty;
+            get => Formula?.A1 ?? String.Empty;
 
             set
             {
                 if (IsInferiorMergedCell())
                     return;
 
-                Formula = !String.IsNullOrWhiteSpace(value)
-                    ? XLCellFormula.NormalA1(value)
-                    : null;
+                var formula = value?.TrimFormulaEqual();
+                if (!String.IsNullOrWhiteSpace(formula))
+                {
+                    var fixedFunctionsFormula = FormulaTransformation.FixFutureFunctions(formula, Worksheet.Name, SheetPoint);
+                    Formula = XLCellFormula.NormalA1(fixedFunctionsFormula);
+                }
+                else
+                {
+                    Formula = null;
+                }
+
                 InvalidateFormula();
             }
         }
@@ -781,32 +761,41 @@ namespace ClosedXML.Excel
                 if (IsInferiorMergedCell())
                     return;
 
-                Formula = !String.IsNullOrWhiteSpace(value)
-                    ? XLCellFormula.NormalR1C1(value)
-                    : null;
+                var formula = value?.TrimFormulaEqual();
+                if (!String.IsNullOrWhiteSpace(formula))
+                {
+                    var formulaA1 = FormulaConverter.ToA1(formula, _rowNumber, _columnNumber);
+                    var fixedFunctionsFormulaA1 = FormulaTransformation.FixFutureFunctions(formulaA1, Worksheet.Name, SheetPoint);
+                    Formula = XLCellFormula.NormalA1(fixedFunctionsFormulaA1);
+                }
+                else
+                {
+                    Formula = null;
+                }
+
                 InvalidateFormula();
             }
         }
 
         public XLHyperlink GetHyperlink()
         {
-            return SliceHyperlink ?? CreateHyperlink();
+            if (Worksheet.Hyperlinks.TryGet(SheetPoint, out var hyperlink))
+                return hyperlink;
+
+            return CreateHyperlink();
         }
 
-        public void SetHyperlink(XLHyperlink hyperlink)
+#nullable enable
+        /// <inheritdoc />
+        public void SetHyperlink(XLHyperlink? hyperlink)
         {
-            Worksheet.Hyperlinks.TryDelete(Address);
+            if (Worksheet.Hyperlinks.TryGet(SheetPoint, out var existingHyperlink))
+                Worksheet.Hyperlinks.Delete(existingHyperlink);
 
-            SliceHyperlink = hyperlink;
+            if (hyperlink is null)
+                return;
 
-            if (SliceHyperlink == null) return;
-
-            SliceHyperlink.Worksheet = Worksheet;
-            SliceHyperlink.Cell = this;
-
-            Worksheet.Hyperlinks.Add(SliceHyperlink);
-
-            if (SettingHyperlink) return;
+            Worksheet.Hyperlinks.Add(SheetPoint, hyperlink);
 
             if (GetStyleForRead().Font.FontColor.Equals(Worksheet.StyleValue.Font.FontColor))
                 Style.Font.FontColor = XLColor.FromTheme(XLThemeColor.Hyperlink);
@@ -814,6 +803,13 @@ namespace ClosedXML.Excel
             if (GetStyleForRead().Font.Underline == Worksheet.StyleValue.Font.Underline)
                 Style.Font.Underline = XLFontUnderlineValues.Single;
         }
+
+        internal void SetCellHyperlink(XLHyperlink hyperlink)
+        {
+            Worksheet.Hyperlinks.Clear(SheetPoint);
+            Worksheet.Hyperlinks.Add(SheetPoint, hyperlink);
+        }
+#nullable disable
 
         public XLHyperlink CreateHyperlink()
         {
@@ -1067,10 +1063,7 @@ namespace ClosedXML.Excel
             return this;
         }
 
-        public Boolean HasHyperlink
-        {
-            get { return SliceHyperlink != null; }
-        }
+        public Boolean HasHyperlink => Worksheet.Hyperlinks.TryGet(SheetPoint, out _);
 
         /// <inheritdoc />
         public Boolean ShowPhonetic
@@ -1356,11 +1349,10 @@ namespace ClosedXML.Excel
 
             FormulaR1C1 = source.FormulaR1C1;
             SliceComment = source.SliceComment == null ? null : new XLComment(this, source.SliceComment, source.Style.Font, source.SliceComment.Style);
-            if (source.SliceHyperlink != null)
+
+            if (source.Worksheet.Hyperlinks.TryGet(source.SheetPoint, out var sourceHyperlink))
             {
-                SettingHyperlink = true;
-                SetHyperlink(new XLHyperlink(source.GetHyperlink()));
-                SettingHyperlink = false;
+                SetCellHyperlink(new XLHyperlink(sourceHyperlink));
             }
         }
 

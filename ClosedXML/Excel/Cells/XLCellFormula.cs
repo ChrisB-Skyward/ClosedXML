@@ -1,5 +1,3 @@
-#nullable disable
-
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -38,7 +36,6 @@ namespace ClosedXML.Excel
         private XLSheetPoint _input1;
         private XLSheetPoint _input2;
         private FormulaFlags _flags;
-        private FormulaType _type;
 
         /// <summary>
         /// Is this formula dirty, i.e. is it potentially out of date due to changes
@@ -47,18 +44,11 @@ namespace ClosedXML.Excel
         internal bool IsDirty { get; set; }
 
         /// <summary>
-        /// Formula in A1 notation. Either this or <see cref="R1C1"/> must be set (potentially
-        /// both, due to conversion from one notation to another).
+        /// Formula in A1 notation. Doesn't start with <c>=</c> sign.
         /// </summary>
-        private string A1 { get; set; }
+        internal string A1 { get; private set; }
 
-        /// <summary>
-        /// Formula in R1C1 notation. Either this or <see cref="A1"/> must be set (potentially
-        /// both, due to conversion from one notation to another).
-        /// </summary>
-        private string R1C1 { get; set; }
-
-        internal FormulaType Type => _type;
+        internal FormulaType Type { get; private init; }
 
         /// <summary>
         /// Range for array and data table formulas, otherwise default value.
@@ -122,19 +112,9 @@ namespace ClosedXML.Excel
         /// </summary>
         internal Boolean Input2Deleted => _flags.HasFlag(FormulaFlags.Input2Deleted);
 
-        /// <summary>
-        /// Get stored formula in A1 notation. Returned formula doesn't contain equal sign.
-        /// </summary>
-        /// <param name="cellAddress">Address of the formula cell. Used to convert relative R1C1 to A1, if conversion is necessary.</param>
-        public string GetFormulaA1(XLSheetPoint cellAddress)
+        private XLCellFormula(string a1)
         {
-            if (String.IsNullOrWhiteSpace(A1))
-                A1 = GetFormula(R1C1, FormulaConversionType.R1C1ToA1, cellAddress);
-
-            if (A1.Trim()[0] == '=')
-                return A1.Substring(1);
-
-            return A1;
+            A1 = a1;
         }
 
         /// <summary>
@@ -142,13 +122,7 @@ namespace ClosedXML.Excel
         /// </summary>
         public string GetFormulaR1C1(XLSheetPoint cellAddress)
         {
-            if (String.IsNullOrWhiteSpace(R1C1))
-            {
-                var normalizedA1 = GetFormulaA1(cellAddress);
-                R1C1 = GetFormula(normalizedA1, FormulaConversionType.A1ToR1C1, cellAddress);
-            }
-
-            return R1C1;
+            return GetFormula(A1, FormulaConversionType.A1ToR1C1, cellAddress);
         }
 
         internal static string GetFormula(string strValue, FormulaConversionType conversionType, XLSheetPoint cellAddress)
@@ -181,26 +155,9 @@ namespace ClosedXML.Excel
         /// <param name="formulaA1">Formula in A1 form. Shouldn't start with <c>=</c>.</param>
         internal static XLCellFormula NormalA1(string formulaA1)
         {
-            return new XLCellFormula
+            return new XLCellFormula(formulaA1)
             {
-                A1 = formulaA1,
-                R1C1 = null,
-                _type = FormulaType.Normal,
-                _flags = FormulaFlags.None
-            };
-        }
-
-        /// <summary>
-        /// A factory method to create a normal R1C1 formula. Doesn't affect recalculation version.
-        /// </summary>
-        /// <param name="formulaR1C1">Formula in R1C1 form. Shouldn't start with <c>=</c>.</param>
-        internal static XLCellFormula NormalR1C1(string formulaR1C1)
-        {
-            return new XLCellFormula
-            {
-                A1 = null,
-                R1C1 = formulaR1C1,
-                _type = FormulaType.Normal,
+                Type = FormulaType.Normal,
                 _flags = FormulaFlags.None
             };
         }
@@ -213,11 +170,9 @@ namespace ClosedXML.Excel
         /// <param name="aca">A flag for always calculate array.</param>
         internal static XLCellFormula Array(string arrayFormulaA1, XLSheetRange range, bool aca)
         {
-            return new XLCellFormula
+            return new XLCellFormula(arrayFormulaA1)
             {
-                A1 = arrayFormulaA1,
-                R1C1 = null,
-                _type = FormulaType.Array,
+                Type = FormulaType.Array,
                 _flags = aca ? FormulaFlags.AlwaysCalculateArray : FormulaFlags.None,
                 Range = range
             };
@@ -249,12 +204,11 @@ namespace ClosedXML.Excel
                 rowInput = string.Empty;
             }
 
-            return new XLCellFormula
+            var formula = string.Format(DataTableFormulaFormat, rowInput, colInput);
+            return new XLCellFormula(formula)
             {
-                A1 = string.Format(DataTableFormulaFormat, rowInput, colInput),
-                R1C1 = null,
                 Range = range,
-                _type = FormulaType.DataTable,
+                Type = FormulaType.DataTable,
                 _input1 = input1Address,
                 _flags =
                     (isRowDataTable ? FormulaFlags.Is1DRow : FormulaFlags.None) |
@@ -279,17 +233,16 @@ namespace ClosedXML.Excel
         {
             var colInput = input1Deleted ? "#REF!" : input1Address.ToString();
             var rowInput = input2Deleted ? "#REF!" : input2Address.ToString();
-            return new XLCellFormula
+            var formula = string.Format(DataTableFormulaFormat, rowInput, colInput);
+            return new XLCellFormula(formula)
             {
-                A1 = string.Format(DataTableFormulaFormat, rowInput, colInput),
-                R1C1 = null,
                 Range = range,
-                _type = FormulaType.DataTable,
+                Type = FormulaType.DataTable,
                 _input1 = input1Address,
                 _input2 = input2Address,
                 _flags = FormulaFlags.Is2D |
-                (input1Deleted ? FormulaFlags.Input1Deleted : FormulaFlags.None) |
-                (input2Deleted ? FormulaFlags.Input2Deleted : FormulaFlags.None)
+                         (input1Deleted ? FormulaFlags.Input1Deleted : FormulaFlags.None) |
+                         (input2Deleted ? FormulaFlags.Input2Deleted : FormulaFlags.None)
             };
         }
 
@@ -338,23 +291,21 @@ namespace ClosedXML.Excel
         /// <param name="engine">Engine to parse the formula into AST, if necessary.</param>
         public Formula GetAst(XLCalcEngine engine)
         {
-            var ast = A1 is not null
-                ? engine.Parse(A1)
-                : engine.ParseR1C1(R1C1);
+            var ast = engine.Parse(A1);
             return ast;
         }
 
         public override string ToString()
         {
-            return A1 ?? R1C1;
+            return A1;
         }
 
         public void RenameSheet(XLSheetPoint origin, string oldSheetName, string newSheetName)
         {
-            var a1 = GetFormulaA1(origin);
-            var res = FormulaConverter.ModifyA1(a1, origin.Row, origin.Column, new RenameRefModVisitor
+            var a1 = A1;
+            var res = FormulaConverter.ModifyA1(a1, newSheetName, origin.Row, origin.Column, new RenameRefModVisitor
             {
-                Sheets = new Dictionary<string, string> { { oldSheetName, newSheetName } }
+                Sheets = new Dictionary<string, string?> { { oldSheetName, newSheetName } }
             });
 
             if (res != a1)
@@ -362,6 +313,19 @@ namespace ClosedXML.Excel
                 A1 = res;
                 IsDirty = true;
             }
+        }
+
+        internal XLCellFormula GetMovedTo(XLSheetPoint origin, XLSheetPoint destination)
+        {
+            // I could in theory swap 1x1 array or dataTable, but not worth it in this path.
+            if (Type != FormulaType.Normal)
+                throw new InvalidOperationException("Can only swap normal formulas.");
+
+            var originR1C1 = FormulaConverter.ToR1C1(A1, origin.Row, origin.Column);
+            var targetA1 = FormulaConverter.ToA1(originR1C1, destination.Row, destination.Column);
+            var targetFormula = NormalA1(targetA1);
+            targetFormula.IsDirty = true;
+            return targetFormula;
         }
     }
 }

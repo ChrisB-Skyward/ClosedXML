@@ -63,7 +63,7 @@ namespace ClosedXML.Excel
             DefinedNames = new XLDefinedNames(this);
             SheetView = new XLSheetView(this);
             Tables = new XLTables();
-            Hyperlinks = new XLHyperlinks();
+            Hyperlinks = new XLHyperlinks(this);
             DataValidations = new XLDataValidations(this);
             PivotTables = new XLPivotTables(this);
             _protection = new XLSheetProtection(DefaultProtectionAlgorithm);
@@ -647,7 +647,9 @@ namespace ClosedXML.Excel
             return targetSheet;
         }
 
-        public new IXLHyperlinks Hyperlinks { get; private set; }
+        internal XLHyperlinks Hyperlinks { get; }
+
+        IXLHyperlinks IXLWorksheet.Hyperlinks => Hyperlinks;
 
         IXLDataValidations IXLWorksheet.DataValidations
         {
@@ -1197,17 +1199,21 @@ namespace ClosedXML.Excel
             ShiftDataValidationColumns(range, columnsShifted);
             ShiftPageBreaksColumns(range, columnsShifted);
             RemoveInvalidSparklines();
+
+            ISheetListener hyperlinks = Hyperlinks;
             if (columnsShifted > 0)
             {
                 var area = XLSheetRange
                     .FromRangeAddress(range.RangeAddress)
                     .ExtendRight(columnsShifted - 1);
                 Workbook.CalcEngine.OnInsertAreaAndShiftRight(range.Worksheet, area);
+                hyperlinks.OnInsertAreaAndShiftRight(range.Worksheet, area);
             }
             else if (columnsShifted < 0)
             {
                 var area = XLSheetRange.FromRangeAddress(range.RangeAddress);
                 Workbook.CalcEngine.OnDeleteAreaAndShiftLeft(range.Worksheet, area);
+                hyperlinks.OnDeleteAreaAndShiftLeft(range.Worksheet, area);
             }
         }
 
@@ -1339,17 +1345,21 @@ namespace ClosedXML.Excel
             ShiftDataValidationRows(range, rowsShifted);
             RemoveInvalidSparklines();
             ShiftPageBreaksRows(range, rowsShifted);
+
+            ISheetListener hyperlinks = Hyperlinks;
             if (rowsShifted > 0)
             {
                 var area = XLSheetRange
                     .FromRangeAddress(range.RangeAddress)
                     .ExtendBelow(rowsShifted - 1);
                 Workbook.CalcEngine.OnInsertAreaAndShiftDown(range.Worksheet, area);
+                hyperlinks.OnInsertAreaAndShiftDown(range.Worksheet, area);
             }
             else if (rowsShifted < 0)
             {
                 var area = XLSheetRange.FromRangeAddress(range.RangeAddress);
                 Workbook.CalcEngine.OnDeleteAreaAndShiftUp(range.Worksheet, area);
+                hyperlinks.OnDeleteAreaAndShiftUp(range.Worksheet, area);
             }
         }
 
@@ -1471,11 +1481,14 @@ namespace ClosedXML.Excel
         {
             foreach (var definedName in definedNames)
             {
-                var newRangeList =
-                    definedName.SheetReferencesList.Select(r => XLCell.ShiftFormulaRows(r, this, range, rowsShifted)).Where(
-                        newReference => newReference.Length > 0).ToList();
-                var unionFormula = string.Join(",", newRangeList);
-                definedName.SetRefersTo(unionFormula);
+                if (definedName.SheetReferencesList.Count() > 0)
+                {
+                    var newRangeList =
+                        definedName.SheetReferencesList.Select(r => XLCell.ShiftFormulaRows(r, this, range, rowsShifted)).Where(
+                            newReference => newReference.Length > 0).ToList();
+                    var unionFormula = string.Join(",", newRangeList);
+                    definedName.SetRefersTo(unionFormula);
+                }
             }
         }
 
@@ -1927,9 +1940,9 @@ namespace ClosedXML.Excel
         /// <summary>
         /// Get cell or null, if cell doesn't exist.
         /// </summary>
-        internal XLCell? GetCell(int ro, int co)
+        internal XLCell? GetCell(XLSheetPoint point)
         {
-            return Worksheet.Internals.CellsCollection.GetUsedCell(new XLSheetPoint(ro, co));
+            return Worksheet.Internals.CellsCollection.GetUsedCell(point);
         }
 
         public XLRange GetOrCreateRange(XLRangeParameters xlRangeParameters)
