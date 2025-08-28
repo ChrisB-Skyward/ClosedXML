@@ -57,7 +57,7 @@ namespace ClosedXML.Excel
         internal static readonly StringComparer FunctionComparer = StringComparer.OrdinalIgnoreCase;
 
         internal static readonly Regex RCSimpleRegex = new Regex(
-            @"^(r(((-\d)?\d*)|\[(-\d)?\d*\]))?(c(((-\d)?\d*)|\[(-\d)?\d*\]))?$"
+            @"^(r(((-\d)?\d*)|\[(-\d)?\d*\]))?(c(((-\d)?\d*)|\[(-\d)?\d*\]))?"
             , RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         internal static readonly Regex A1SimpleRegex = new Regex(
